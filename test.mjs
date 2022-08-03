@@ -1,3 +1,3 @@
-import v from './src/validator.mjs'
+import v from './src/lua_modules.mjs'
 
 console.log(v)

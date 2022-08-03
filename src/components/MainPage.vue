@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import Validator from '../validator.mjs'
+import Validator from '../lua_modules.mjs'
 
 defineProps({
   msg: String

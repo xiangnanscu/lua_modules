@@ -1,7 +1,6 @@
-public
-logs
 node_modules
 public
+logs
 tmp
 .vscode
 .github
@@ -10,4 +9,3 @@ index.html
 vite.config.js
 yarn.lock
 src/*
-!src/validator.mjs

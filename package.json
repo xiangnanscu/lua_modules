@@ -1,8 +1,8 @@
 {
-  "name": "@xiangnanscu/validator",
-  "version": "0.2.0",
-  "description": "validator",
-  "main": "src/validator.mjs",
+  "name": "@xiangnanscu/lua_modules",
+  "version": "0.1.0",
+  "description": "lua_modules",
+  "main": "src/lua_modules.mjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -10,19 +10,19 @@
     "prerelease": "npm --no-git-tag-version version minor",
     "release": "push_option=release npm run push",
     "push": "git add . && git commit -am \"${msg:-push}\" && git push --push-option=${push_option:-nothing}",
-    "replace": "find .  -type d \\( -name .git -o -name node_modules \\) -prune -o  -type f  -exec  sed -i s/validator/field/g {} \\;",
+    "replace": "find .  -type d \\( -name .git -o -name node_modules \\) -prune -o  -type f  -exec  sed -i s/lua_modules/lua_modules/g {} \\;",
     "test": "node test.mjs"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xiangnanscu/validator.git"
+    "url": "git+https://github.com/xiangnanscu/lua_modules.git"
   },
   "author": "Nan Xiang",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/xiangnanscu/validator/issues"
+    "url": "https://github.com/xiangnanscu/lua_modules/issues"
   },
-  "homepage": "https://github.com/xiangnanscu/validator#readme",
+  "homepage": "https://github.com/xiangnanscu/lua_modules#readme",
   "devDependencies": {
     "vue": "^3.2.25",
     "@vitejs/plugin-vue": "^2.3.3",
