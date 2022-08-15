@@ -11,7 +11,7 @@
     "release": "push_option=release npm run push",
     "push": "git add . && git commit -am \"${msg:-push}\" && git push --push-option=${push_option:-nothing}",
     "replace": "find .  -type d \\( -name .git -o -name node_modules \\) -prune -o  -type f  -exec  sed -i s/lua_modules/lua_modules/g {} \\;",
-    "test": "node test.mjs"
+    "test": "busted test.lua"
   },
   "repository": {
     "type": "git",
