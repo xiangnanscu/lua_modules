@@ -96,6 +96,16 @@ local function merge_table(t1, t2)
   return res
 end
 
+---@alias set_type "_union"|"_union_all"| "_except"| "_except_all"|"_intersect"|"_intersect_all"
+local PG_SET_MAP = {
+  _union = 'UNION',
+  _union_all = 'UNION ALL',
+  _except = 'EXCEPT',
+  _except_all = 'EXCEPT ALL',
+  _intersect = 'INTERSECT',
+  _intersect_all = 'INTERSECT ALL'
+}
+
 ---adding v-prefix
 ---@param column string
 ---@return string
@@ -179,8 +189,8 @@ local function get_cte_returning_values(columns, literals)
 end
 
 ---helper
----@alias returning_opts {columns: dbvalue[], literals: string[]}
----@param opts {returning: dbvalue[],cte_returning:returning_opts}
+---@alias cte_returning_opts {columns: string[], literals: dbvalue[], literal_columns: string[]}
+---@param opts {returning: dbvalue[],cte_returning:cte_returning_opts}
 ---@return string
 local function get_returning_token(opts)
   if opts.cte_returning then
@@ -192,7 +202,7 @@ local function get_returning_token(opts)
   end
 end
 
----@alias sql_options {table_name:string,delete?:boolean,distinct?:boolean,from?:string,group?:string,having?:string,insert?:string,limit?:number,offset?:number,order?:string,select?:string,update?:string,using?:string,where?:string,with?:string,returning?: dbvalue[],cte_returning?:returning_opts}
+---@alias sql_options {table_name:string,delete?:boolean,distinct?:boolean,from?:string,group?:string,having?:string,insert?:string,limit?:number,offset?:number,order?:string,select?:string,update?:string,using?:string,where?:string,with?:string,returning?: string,cte_returning?:cte_returning_opts}
 ---assemble a sql
 ---@param opts sql_options
 ---@return string
@@ -210,7 +220,7 @@ local function assemble_sql(opts)
     local using = opts.using and " USING " .. opts.using or ""
     local where = opts.where and " WHERE " .. opts.where or ""
     local returning = get_returning_token(opts)
-    statement = string_format("DELETE FROM %s %s%s%s", opts.table_name, using, where, returning)
+    statement = string_format("DELETE FROM %s%s%s%s", opts.table_name, using, where, returning)
   else
     local from = opts.from or opts.table_name
     local where = opts.where and " WHERE " .. opts.where or ""
@@ -237,7 +247,33 @@ function SqlMeta.__call(cls, kwargs)
 end
 
 ---@class Sql
----@field _pcall boolean
+---@field table_name string
+---@field _pcall? boolean
+---@field _as?  string
+---@field _with?  string
+---@field _join?  string
+---@field _distinct?  boolean
+---@field _returning?  string
+---@field _cte_returning?  cte_returning_opts
+---@field _returning_args?  dbvalue[]
+---@field _insert?  string
+---@field _update?  string
+---@field _delete?  boolean
+---@field _using?  string
+---@field _select?  string
+---@field _from?  string
+---@field _where?  string
+---@field _group?  string
+---@field _having?  string
+---@field _order?  string
+---@field _limit?  number
+---@field _offset?  number
+---@field _union?  Sql | string
+---@field _union_all?  Sql | string
+---@field _except?  Sql | string
+---@field _except_all?  Sql | string
+---@field _intersect?  Sql | string
+---@field _intersect_all?  Sql | string
 local Sql = setmetatable({
   __SQL_BUILDER__ = true,
   r = make_raw_token,
@@ -268,19 +304,36 @@ function Sql.pcall(self)
   return self
 end
 
+---@param self Sql
+---@param err string|table
+---@param level? number
+---@return nil, string|table
+---@return any
 function Sql.error(self, err, level)
   if self._pcall then
     return nil, err
   else
-    return error(err, level)
+    error(err, level)
   end
 end
 
+function Sql.make_class(cls, ...)
+  local subcls = {}
+  for i, t in ipairs({ cls, ... }) do
+    for k, v in pairs(t) do
+      subcls[k] = v
+    end
+  end
+  subcls.__index = subcls
+  subcls.__call = SqlMeta.__call
+  return setmetatable(subcls, cls)
+end
+
 ---@alias row {[string]:dbvalue}
----@alias rows row|row[]
+---@alias rows row[]
 ---get keys array from a row or row array
 ---@param self Sql
----@param rows rows
+---@param rows row|rows
 ---@return string[]
 function Sql._get_keys(self, rows)
   local columns = {}
@@ -328,7 +381,7 @@ function Sql._rows_to_array(self, rows, columns, fallback)
   return values
 end
 
----_get_insert_values_token, {foo="bar"} => "('bar')", {"foo"}
+---{name="kate", age=11} => "('kate', 11)", {"name", "age"}
 ---@param self Sql
 ---@param row row
 ---@param columns? string[]
@@ -342,10 +395,10 @@ function Sql._get_insert_values_token(self, row, columns)
       table_insert(value_list, v)
     end
   else
-    for i, col in pairs(columns) do
-      local e = row[col]
-      if e ~= nil then
-        table_insert(value_list, e)
+    for _, col in pairs(columns) do
+      local v = row[col]
+      if v ~= nil then
+        table_insert(value_list, v)
       else
         table_insert(value_list, DEFAULT)
       end
@@ -364,6 +417,7 @@ function Sql._get_bulk_insert_values_token(self, rows, columns, fallback)
   rows = self:_rows_to_array(rows, columns, fallback)
   return map(rows, as_literal), columns
 end
+
 ---f({'a','b','c'}, 'a', 'V') => 'b = V.b, c = V.c'
 ---f({'a','b','c'}, {'a','b'}, 'V') => 'c = V.c'
 ---use V as data table name so both Sql.upsert and Sql.merge can use it.
@@ -372,7 +426,7 @@ end
 ---@param key string|string[]
 ---@param table_name string
 ---@return string
-function Sql._get_update_set_token(self, columns, key, table_name)
+function Sql._get_update_token_with_prefix(self, columns, key, table_name)
   local tokens = {}
   if type(key) == "string" then
     for i, col in ipairs(columns) do
@@ -393,6 +447,7 @@ function Sql._get_update_set_token(self, columns, key, table_name)
   end
   return table_concat(tokens, ", ")
 end
+
 ---parse select token
 ---@param self Sql
 ---@param a dbvalue
@@ -410,11 +465,12 @@ function Sql._get_select_token(self, a, b, ...)
     return s
   end
 end
+
 ---parse select literal token
 ---@param self Sql
 ---@param a dbvalue
 ---@param b? dbvalue
----@param ...? unknown
+---@param ...? dbvalue[]
 ---@return string
 function Sql._get_select_token_literal(self, a, b, ...)
   if b == nil then
@@ -436,7 +492,8 @@ function Sql._get_select_token_literal(self, a, b, ...)
     return s
   end
 end
----f{foo='bar'} => 
+
+---f{name='kate', age=22} => "name = 'kate', age = 22"
 ---@param self Sql
 ---@param row row
 ---@param columns? string[]
@@ -448,7 +505,7 @@ function Sql._get_update_token(self, row, columns)
       table_insert(kv, string_format("%s = %s", k, as_literal(v)))
     end
   else
-    for i, k in ipairs(columns) do
+    for _, k in ipairs(columns) do
       local v = row[k]
       table_insert(kv, string_format("%s = %s", k, v ~= nil and as_literal(v) or 'DEFAULT'))
     end
@@ -456,26 +513,43 @@ function Sql._get_update_token(self, row, columns)
   return table_concat(kv, ", ")
 end
 
+---@param self Sql
+---@param name string
+---@param token? Sql|dbvalue
+---@return string
 function Sql._get_with_token(self, name, token)
-  if self:is_instance(token) then
+  if token == nil then
+    return name
+  elseif self:is_instance(token) then
     return string_format("%s AS (%s)", name, token:statement())
-  elseif token ~= nil then
-    return string_format("%s AS %s", name, token)
   else
-    return as_token(name)
+    return string_format("%s AS %s", name, token)
   end
 end
 
+---return a string like: (col, col2) VALUES ('v1', 'v2')
+---@param self Sql
+---@param row row
+---@param columns? string[]
+---@return string
 function Sql._get_insert_token(self, row, columns)
-  row, columns = self:_get_insert_values_token(row, columns)
-  return string_format("(%s) VALUES %s", as_token(columns), row)
+  local values_token, insert_columns = self:_get_insert_values_token(row, columns)
+  return string_format("(%s) VALUES %s", as_token(insert_columns), values_token)
 end
 
+---@param self Sql
+---@param rows row[]
+---@param columns? string[]
+---@return string
 function Sql._get_bulk_insert_token(self, rows, columns)
   rows, columns = self:_get_bulk_insert_values_token(rows, columns, DEFAULT)
   return string_format("(%s) VALUES %s", as_token(columns), as_token(rows))
 end
 
+---comment
+---@param self Sql
+---@param sub_query Sql
+---@param columns? string[]
 function Sql._set_select_subquery_insert_token(self, sub_query, columns)
   local columns_token = as_token(columns or sub_query._select or "")
   if columns_token ~= "" then
@@ -485,35 +559,53 @@ function Sql._set_select_subquery_insert_token(self, sub_query, columns)
   end
 end
 
+--- 当literal_columns存在时:with d(c1,c2) as (delete from t returning c1,c2,'v1','v2')
+--- 但似乎没有影响, 即returning列多于with d(c1,c2)中的列
+---set insert values from insert/update/delete returning
+---@param self Sql
+---@param sub_query Sql
 function Sql._set_cud_subquery_insert_token(self, sub_query)
-  if sub_query._cte_returning then
-    local cr = sub_query._cte_returning
-    local cte_columns = cr.columns
-    local insert_columns = merge_table(cte_columns, cr.literal_columns)
-    local cud_select_query = Sql:new { table_name = "d" }:select(cte_columns):select_literal(cr.literals)
-    -- 当literal_columns存在时:with d(c1,c2) as (delete from t returning c1,c2,'v1','v2')
-    -- 但似乎没有影响, 即returning列多于with d(c1,c2)中的列
-    self:with(string_format("d(%s)", as_token(cte_columns)), sub_query)
-    self._insert = string_format("(%s) %s", as_token(insert_columns), cud_select_query)
+  local cte_return = sub_query._cte_returning
+  if cte_return then
+    local cte_columns = cte_return.columns
+    local insert_columns = merge_table(cte_columns, cte_return.literal_columns)
+    -- local cud_select_query = Sql:new { table_name = "d" }:select(cte_columns):select_literal(cte_return.literals)
+    local cud_select_query = Sql:new { table_name = "d" }:select(insert_columns)
+    -- self:with(string_format("d(%s)", as_token(cte_columns)), sub_query)
+    self:with(string_format("d(%s)", as_token(insert_columns)), sub_query)
+    self._insert = string_format("(%s) %s", as_token(insert_columns), cud_select_query:statement())
   elseif sub_query._returning_args then
     local insert_columns = flat(sub_query._returning_args)
     local cud_select_query = Sql:new { table_name = "d" }:select(insert_columns)
     self:with(string_format("d(%s)", as_token(insert_columns)), sub_query)
-    self._insert = string_format("(%s) %s", as_token(insert_columns), cud_select_query)
+    self._insert = string_format("(%s) %s", as_token(insert_columns), cud_select_query:statement())
   end
 end
 
+---comment
+---@param self Sql
+---@param row row
+---@param key string|string[]
+---@param columns? string[]
+---@return string
 function Sql._get_upsert_token(self, row, key, columns)
-  row, columns = self:_get_insert_values_token(row, columns)
-  local insert_token = string_format("(%s) VALUES %s ON CONFLICT (%s)", as_token(columns), row,
+  local values_token, columns = self:_get_insert_values_token(row, columns)
+  local insert_token = string_format("(%s) VALUES %s ON CONFLICT (%s)", as_token(columns), values_token,
     self:_get_select_token(key))
   if (type(key) == "table" and #key == #columns) or #columns == 1 then
     return string_format("%s DO NOTHING", insert_token)
   else
-    return string_format("%s DO UPDATE SET %s", insert_token, self:_get_update_set_token(columns, key, "EXCLUDED"))
+    return string_format("%s DO UPDATE SET %s", insert_token,
+      self:_get_update_token_with_prefix(columns, key, "EXCLUDED"))
   end
 end
 
+---comment
+---@param self Sql
+---@param rows row[]
+---@param key string|string[]
+---@param columns? string[]
+---@return string
 function Sql._get_bulk_upsert_token(self, rows, key, columns)
   rows, columns = self:_get_bulk_insert_values_token(rows, columns, DEFAULT)
   local insert_token = string_format("(%s) VALUES %s ON CONFLICT (%s)", as_token(columns), as_token(rows),
@@ -521,26 +613,37 @@ function Sql._get_bulk_upsert_token(self, rows, key, columns)
   if (type(key) == "table" and #key == #columns) or #columns == 1 then
     return string_format("%s DO NOTHING", insert_token)
   else
-    return string_format("%s DO UPDATE SET %s", insert_token, self:_get_update_set_token(columns, key, "EXCLUDED"))
+    return string_format("%s DO UPDATE SET %s", insert_token,
+      self:_get_update_token_with_prefix(columns, key, "EXCLUDED"))
   end
 end
 
+---comment
+---@param self Sql
+---@param rows Sql
+---@param key string|string[]
+---@param columns string[]
+---@return string
 function Sql._get_upsert_query_token(self, rows, key, columns)
-  assert(type(columns) == "table", "columns (table) must be provided for upserting from subquery")
   local columns_token = self:_get_select_token(columns)
   local insert_token = string_format("(%s) %s ON CONFLICT (%s)", columns_token, rows:statement(),
     self:_get_select_token(key))
   if (type(key) == "table" and #key == #columns) or #columns == 1 then
     return string_format("%s DO NOTHING", insert_token)
   else
-    return string_format("%s DO UPDATE SET %s", insert_token, self:_get_update_set_token(columns, key, "EXCLUDED"))
+    return string_format("%s DO UPDATE SET %s", insert_token,
+      self:_get_update_token_with_prefix(columns, key, "EXCLUDED"))
   end
 end
 
+---comment
+---@param self Sql
+---@param a string
+---@param b? string
+---@param c? string
+---@return string
 function Sql._get_join_expr(self, a, b, c)
-  if a == nil then
-    return self:error(b or "auguments is required for _get_join_expr")
-  elseif b == nil then
+  if b == nil then
     return a
   elseif c == nil then
     return string_format("%s = %s", a, b)
@@ -549,6 +652,13 @@ function Sql._get_join_expr(self, a, b, c)
   end
 end
 
+---comment
+---@param self Sql
+---@param join_type string
+---@param right_table string
+---@param conditions string
+---@param ... string[]
+---@return string
 function Sql._get_join_token(self, join_type, right_table, conditions, ...)
   if conditions ~= nil then
     return string_format("%s JOIN %s ON (%s)", join_type, right_table, self:_get_join_expr(conditions, ...))
@@ -557,22 +667,49 @@ function Sql._get_join_token(self, join_type, right_table, conditions, ...)
   end
 end
 
-function Sql._get_inner_join(self, ...)
-  return self:_get_join_token("INNER", ...)
+---comment
+---@param self Sql
+---@param right_table string
+---@param conditions string
+---@param ... string[]
+---@return string
+function Sql._get_inner_join(self, right_table, conditions, ...)
+  return self:_get_join_token("INNER", right_table, conditions, ...)
 end
 
-function Sql._get_left_join(self, ...)
-  return self:_get_join_token("LEFT", ...)
+---@param self Sql
+---@param right_table string
+---@param conditions string
+---@param ... string[]
+---@return string
+function Sql._get_left_join(self, right_table, conditions, ...)
+  return self:_get_join_token("LEFT", right_table, conditions, ...)
 end
 
-function Sql._get_right_join(self, ...)
-  return self:_get_join_token("RIGHT", ...)
+---@param self Sql
+---@param right_table string
+---@param conditions string
+---@param ... string[]
+---@return string
+function Sql._get_right_join(self, right_table, conditions, ...)
+  return self:_get_join_token("RIGHT", right_table, conditions, ...)
 end
 
-function Sql._get_full_join(self, ...)
-  return self:_get_join_token("FULL", ...)
+---@param self Sql
+---@param right_table string
+---@param conditions string
+---@param ... string[]
+---@return string
+function Sql._get_full_join(self, right_table, conditions, ...)
+  return self:_get_join_token("FULL", right_table, conditions, ...)
 end
 
+---comment
+---@param self Sql
+---@param cols string|string[]
+---@param range Sql|table|string
+---@param operator? string
+---@return string
 function Sql._get_in_token(self, cols, range, operator)
   cols = as_token(cols)
   operator = operator or "IN"
@@ -587,11 +724,20 @@ function Sql._get_in_token(self, cols, range, operator)
   end
 end
 
+---@param self Sql
+---@param sub_select Sql
+---@param columns? string[]
+---@return string
 function Sql._get_update_query_token(self, sub_select, columns)
-  return string_format("(%s) = (%s)", columns and self:_get_select_token(columns) or sub_select._select,
-    sub_select:statement())
+  local columns_token = columns and self:_get_select_token(columns) or sub_select._select
+  return string_format("(%s) = (%s)", columns_token, sub_select:statement())
 end
 
+---@param self Sql
+---@param key string|string[]
+---@param left_table string
+---@param right_table string
+---@return string
 function Sql._get_join_conditions(self, key, left_table, right_table)
   if type(key) == "string" then
     return string_format("%s.%s = %s.%s", left_table, key, right_table, key)
@@ -603,12 +749,20 @@ function Sql._get_join_conditions(self, key, left_table, right_table)
   return table_concat(res, " AND ")
 end
 
+---@param self Sql
+---@param rows row[]
+---@param columns string[]
+---@return string[], string[]
 function Sql._get_cte_values_literal(self, rows, columns)
   return self:_get_bulk_insert_values_token(rows, columns, NULL)
 end
 
+---@param self Sql
+---@param where_token string
+---@param tpl string
+---@return Sql
 function Sql._handle_where_token(self, where_token, tpl)
-  if where_token == nil or where_token == "" then
+  if where_token == "" then
     return self
   elseif self._where == nil then
     self._where = where_token
@@ -618,6 +772,10 @@ function Sql._handle_where_token(self, where_token, tpl)
   return self
 end
 
+---@param self Sql
+---@param kwargs {[string|number]:any}
+---@param logic? string
+---@return string
 function Sql._get_condition_token_from_table(self, kwargs, logic)
   local tokens = {}
   for k, value in pairs(kwargs) do
@@ -637,71 +795,96 @@ function Sql._get_condition_token_from_table(self, kwargs, logic)
   end
 end
 
-function Sql._get_condition_token(self, first, second, third)
-  if first == nil then
-    return self:error(second or "arguments is required for _get_condition_token")
-  elseif second == nil then
-    local argtype = type(first)
+---@param self Sql
+---@param a table|string|function
+---@param b? dbvalue
+---@param c? dbvalue
+---@return string
+function Sql._get_condition_token(self, a, b, c)
+  if b == nil then
+    local argtype = type(a)
     if argtype == "table" then
-      return self:_get_condition_token_from_table(first)
+      return self:_get_condition_token_from_table(a)
     elseif argtype == "string" then
-      return first
+      return a
     elseif argtype == "function" then
-      local _where = self._where
+      local old_where = self._where
       self._where = nil
-      local res, err = first(self)
+      local res, err = a(self)
       if res ~= nil then
         if res == self then
           local group_where = self._where
-          self._where = _where
-          return group_where
+          if group_where == nil then
+            error("no where token generate after calling condition function")
+          else
+            self._where = old_where
+            return group_where
+          end
         else
-          self._where = _where
+          self._where = old_where
           return res
         end
       else
-        return self:error(err or "nil returned in condition function", 0)
+        error(err or "nil returned in condition function")
       end
     else
-      return self:error("invalid condition type: " .. argtype, 0)
+      error("invalid condition type: " .. argtype)
     end
-  elseif third == nil then
-    return string_format("%s = %s", first, as_literal(second))
+  elseif c == nil then
+    return string_format("%s = %s", a, as_literal(b))
   else
-    return string_format("%s %s %s", first, second, as_literal(third))
+    return string_format("%s %s %s", a, b, as_literal(c))
   end
 end
 
-function Sql._get_condition_token_or(self, first, ...)
-  if type(first) == "table" then
-    return self:_get_condition_token_from_table(first, "OR")
+---@param self Sql
+---@param a table|string|function
+---@param b? dbvalue
+---@param c? dbvalue
+---@return string
+function Sql._get_condition_token_or(self, a, b, c)
+  if type(a) == "table" then
+    return self:_get_condition_token_from_table(a, "OR")
   else
-    return self:_get_condition_token(first, ...)
+    return self:_get_condition_token(a, b, c)
   end
 end
 
-function Sql._get_condition_token_not(self, first, ...)
+---@param self Sql
+---@param a table|string|function
+---@param b? dbvalue
+---@param c? dbvalue
+---@return string
+function Sql._get_condition_token_not(self, a, b, c)
   local token
-  if type(first) == "table" then
-    token = self:_get_condition_token_from_table(first, "OR")
+  if type(a) == "table" then
+    token = self:_get_condition_token_from_table(a, "OR")
   else
-    token = self:_get_condition_token(first, ...)
+    token = self:_get_condition_token(a, b, c)
   end
   return token ~= "" and string_format("NOT (%s)", token) or ""
 end
 
+---@param self Sql
+---@param other_sql Sql
+---@param inner_attr set_type
+---@return Sql
 function Sql._handle_set_option(self, other_sql, inner_attr)
   if not self[inner_attr] then
-    self[inner_attr] = other_sql;
+    self[inner_attr] = other_sql:statement();
   else
-    self[inner_attr] = string_format("(%s) %s (%s)", self[inner_attr], inner_attr:sub(2):upper(), other_sql);
+    self[inner_attr] = string_format("(%s) %s (%s)", self[inner_attr], PG_SET_MAP[inner_attr], other_sql:statement());
   end
   if self ~= Sql then
-    self.statement = self._statement_for_set;
+    self.statement = self._statement_for_set
+  else
+    error("don't call _handle_set_option directly on Sql class")
   end
   return self;
 end
 
+---@param self Sql
+---@return string
 function Sql._statement_for_set(self)
   local statement = Sql.statement(self)
   if self._intersect then
@@ -720,6 +903,8 @@ function Sql._statement_for_set(self)
   return statement
 end
 
+---@param self Sql
+---@return string
 function Sql.statement(self)
   local table_name = self:get_table()
   local statement = assemble_sql {
@@ -745,8 +930,12 @@ function Sql.statement(self)
   return statement
 end
 
-function Sql.with(self, ...)
-  local with_token = self:_get_with_token(...)
+---@param self Sql
+---@param name string
+---@param token? dbvalue
+---@return Sql
+function Sql.with(self, name, token)
+  local with_token = self:_get_with_token(name, token)
   if self._with then
     self._with = string_format("%s, %s", self._with, with_token)
   else
@@ -755,6 +944,10 @@ function Sql.with(self, ...)
   return self
 end
 
+---comment
+---@param self Sql
+---@param other_sql Sql
+---@return Sql
 function Sql.union(self, other_sql)
   return self:_handle_set_option(other_sql, "_union");
 end
@@ -779,11 +972,20 @@ function Sql.intersect_all(self, other_sql)
   return self:_handle_set_option(other_sql, "_intersect_all");
 end
 
+---comment
+---@param self Sql
+---@param table_alias string
+---@return Sql
 function Sql.as(self, table_alias)
   self._as = table_alias
   return self
 end
 
+---comment
+---@param self Sql
+---@param name string
+---@param rows row[]
+---@return Sql
 function Sql.with_values(self, name, rows)
   local columns = self:_get_keys(rows[1])
   rows, columns = self:_get_cte_values_literal(rows, columns)
@@ -792,6 +994,11 @@ function Sql.with_values(self, name, rows)
   return self:with(cte_name, cte_values)
 end
 
+---comment
+---@param self Sql
+---@param rows row|row[]|Sql
+---@param columns? string[]
+---@return Sql
 function Sql.insert(self, rows, columns)
   if type(rows) == "table" then
     if self:is_instance(rows) then
@@ -805,32 +1012,42 @@ function Sql.insert(self, rows, columns)
     elseif next(rows) ~= nil then
       self._insert = self:_get_insert_token(rows, columns)
     else
-      return self:error("can't pass empty table to sql.insert")
+      error("can't pass empty table to sql.insert")
     end
-  elseif rows ~= nil then
+  elseif type(rows) == 'string' then
     self._insert = rows
   else
-    return self:error("can't pass nil to sql.insert")
+    error("invalid value type to sql.insert:" .. type(rows))
   end
   return self
 end
 
+---comment
+---@param self Sql
+---@param row row|string|Sql
+---@param columns? string[]
+---@return Sql
 function Sql.update(self, row, columns)
-  if type(row) == "table" then
-    if not self:is_instance(row) then
-      self._update = self:_get_update_token(row, columns)
-    else
-      self._update = self:_get_update_query_token(row, columns)
-    end
+  if self:is_instance(row) then
+    self._update = self:_get_update_query_token(row--[[@as Sql]], columns)
+  elseif type(row) == "table" then
+    self._update = self:_get_update_token(row, columns)
   else
-    self._update = row
+    self._update = row --[[@as string]]
   end
   return self
 end
 
+---comment
+---@param self Sql
+---@param rows row[]
+---@param key string|string[]
+---@param columns? string[]
+---@return Sql
 function Sql.upsert(self, rows, key, columns)
   assert(key, "you must provide key for upsert(string or table)")
   if self:is_instance(rows) then
+    assert(columns ~= nil, "you must specify columns when use subquery as values of upsert")
     self._insert = self:_get_upsert_query_token(rows, key, columns)
   elseif rows[1] then
     self._insert = self:_get_bulk_upsert_token(rows, key, columns)
@@ -840,13 +1057,23 @@ function Sql.upsert(self, rows, key, columns)
   return self
 end
 
+---comment
+---@param self Sql
+---@param row any
+---@return boolean
 function Sql.is_instance(self, row)
   return is_sql_instance(row)
 end
 
+---comment
+---@param self Sql
+---@param rows row[]
+---@param key string|string[]
+---@param columns string[]
+---@return Sql
 function Sql.merge(self, rows, key, columns)
   if #rows == 0 then
-    return self:error("empty rows passed to merge")
+    error("empty rows passed to merge")
   end
   rows, columns = self:_get_cte_values_literal(rows, columns)
   local cte_name = string_format("V(%s)", table_concat(columns, ", "))
@@ -861,39 +1088,49 @@ function Sql.merge(self, rows, key, columns)
     updated_subquery = Sql:new { table_name = "V" }:select(vals_columns):join(self.table_name .. " AS T", join_cond)
   else
     updated_subquery = Sql:new { table_name = self.table_name, _as = "T" }
-        :update(self:_get_update_set_token(columns, key, "V")):from("V"):where(join_cond)
+        :update(self:_get_update_token_with_prefix(columns, key, "V")):from("V"):where(join_cond)
         :returning(vals_columns)
   end
   self:with(cte_name, cte_values):with("U", updated_subquery)
   return Sql.insert(self, insert_subquery, columns)
 end
 
+---comment
+---@param self Sql
+---@param rows row[]|Sql
+---@param key string|string[]
+---@param columns string[]
+---@return Sql
 function Sql.updates(self, rows, key, columns)
   if self:is_instance(rows) then
     columns = columns or flat(rows._returning_args)
     local cte_name = string_format("V(%s)", table_concat(columns, ", "))
     local join_cond = self:_get_join_conditions(key, "V", self._as or self.table_name)
     self:with(cte_name, rows)
-    return Sql.update(self, self:_get_update_set_token(columns, key, "V")):from("V"):where(join_cond)
+    return Sql.update(self, self:_get_update_token_with_prefix(columns, key, "V")):from("V"):where(join_cond)
   elseif #rows == 0 then
-    return self:error("empty rows passed to updates")
+    error("empty rows passed to updates")
   else
     rows, columns = self:_get_cte_values_literal(rows, columns)
     local cte_name = string_format("V(%s)", table_concat(columns, ", "))
     local cte_values = string_format("(VALUES %s)", as_token(rows))
     local join_cond = self:_get_join_conditions(key, "V", self._as or self.table_name)
     self:with(cte_name, cte_values)
-    return Sql.update(self, self:_get_update_set_token(columns, key, "V")):from("V"):where(join_cond)
+    return Sql.update(self, self:_get_update_token_with_prefix(columns, key, "V")):from("V"):where(join_cond)
   end
 end
 
-function Sql.gets(self, keys)
-  -- {{id=1}, {id=2}, {id=3}} => columns: {'id'}  keys: {{1},{2},{3}}
-  -- each row of keys must be the same struct, so get columns from first row
+--- {{id=1}, {id=2}, {id=3}} => columns: {'id'}  keys: {{1},{2},{3}}
+--- each row of keys must be the same struct, so get columns from first row
+---@param self Sql
+---@param keys row[]
+---@param columns? string[]
+---@return Sql
+function Sql.gets(self, keys, columns)
   if #keys == 0 then
-    return self:error("empty keys passed to gets")
+    error("empty keys passed to gets")
   end
-  local columns = self:_get_keys(keys[1])
+  columns = columns or self:_get_keys(keys[1])
   keys, columns = self:_get_cte_values_literal(keys, columns)
   local join_cond = self:_get_join_conditions(columns, "V", self._as or self.table_name)
   local cte_name = string_format("V(%s)", table_concat(columns, ", "))
@@ -901,6 +1138,11 @@ function Sql.gets(self, keys)
   return self:with(cte_name, cte_values):right_join("V", join_cond)
 end
 
+---comment
+---@param self Sql
+---@param rows row[]
+---@param keys string|string[]
+---@return Sql
 function Sql.merge_gets(self, rows, keys)
   -- {{id=1}, {id=2}, {id=3}} => columns: {'id'}
   -- each row of keys must be the same struct, so get columns from first row
@@ -912,6 +1154,9 @@ function Sql.merge_gets(self, rows, keys)
   return Sql.select(self, "V.*"):with(cte_name, cte_values):right_join("V", join_cond)
 end
 
+---comment
+---@param self Sql
+---@return Sql
 function Sql.copy(self)
   local copy_sql = {}
   for key, value in pairs(self) do
@@ -924,6 +1169,10 @@ function Sql.copy(self)
   return setmetatable(copy_sql, getmetatable(self))
 end
 
+---comment
+---@param self Sql
+---@param ...? unknown
+---@return Sql
 function Sql.delete(self, ...)
   self._delete = true
   if ... ~= nil then
@@ -932,11 +1181,18 @@ function Sql.delete(self, ...)
   return self
 end
 
+---comment
+---@param self Sql
+---@return Sql
 function Sql.distinct(self)
   self._distinct = true
   return self
 end
 
+---comment
+---@param self Sql
+---@param ...? dbvalue[]
+---@return Sql
 function Sql.select(self, ...)
   local s = self:_get_select_token(...)
   if not self._select then
@@ -947,6 +1203,10 @@ function Sql.select(self, ...)
   return self
 end
 
+---comment
+---@param self Sql
+---@param ...? dbvalue[]
+---@return Sql
 function Sql.select_literal(self, ...)
   local s = self:_get_select_token_literal(...)
   if not self._select then
@@ -957,6 +1217,9 @@ function Sql.select_literal(self, ...)
   return self
 end
 
+---@param self Sql
+---@param ...? dbvalue[]
+---@return Sql
 function Sql.returning(self, ...)
   local s = self:_get_select_token(...)
   if not self._returning then
@@ -974,6 +1237,9 @@ function Sql.returning(self, ...)
   return self
 end
 
+---@param self Sql
+---@param ...? dbvalue[]
+---@return Sql
 function Sql.returning_literal(self, ...)
   local s = self:_get_select_token_literal(...)
   if not self._returning then
@@ -989,6 +1255,10 @@ function Sql.returning_literal(self, ...)
   return self
 end
 
+---comment
+---@param self Sql
+---@param opts cte_returning_opts
+---@return Sql
 function Sql.cte_returning(self, opts)
   self._cte_returning = opts
   return self

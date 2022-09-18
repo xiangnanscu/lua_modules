@@ -11,6 +11,7 @@
     "release": "push_option=release npm run push",
     "push": "git add . && git commit -am \"${msg:-push}\" && git push --push-option=${push_option:-nothing}",
     "replace": "find .  -type d \\( -name .git -o -name node_modules \\) -prune -o  -type f  -exec  sed -i s/lua_modules/lua_modules/g {} \\;",
+    "vpn":"sshuttle --dns -r root@rsks.ren 0.0.0.0/0 -x rsks.ren",
     "test": "busted test.lua"
   },
   "repository": {
