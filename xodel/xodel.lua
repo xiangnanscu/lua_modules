@@ -1,8 +1,9 @@
--- https://www.postgresql.org/docs/current/sql-select.html
--- https://www.postgresql.org/docs/current/sql-insert.html
--- https://www.postgresql.org/docs/current/sql-update.html
--- https://www.postgresql.org/docs/current/sql-delete.html
+-- https://www.postgreSql.org/docs/current/sql-select.html
+-- https://www.postgreSql.org/docs/current/sql-insert.html
+-- https://www.postgreSql.org/docs/current/sql-update.html
+-- https://www.postgreSql.org/docs/current/sql-delete.html
 local array = require "xodel.array"
+local object = require "xodel.object"
 local utils = require "xodel.utils"
 local Field = require "xodel.field"
 local nkeys = require "table.nkeys"
@@ -16,6 +17,12 @@ local error = error
 local string_format = string.format
 local table_concat = table.concat
 local table_insert = table.insert
+local ngx_localtime = ngx.localtime
+local match = ngx.re.match
+local ngx_re = require "ngx.re"
+local split = ngx_re.split
+
+
 local table_new, clone, NULL
 if ngx then
   table_new = table.new
@@ -43,6 +50,66 @@ local FOREIGN_KEY = 2
 local NON_FOREIGN_KEY = 3
 local END = 4
 local COMPARE_OPERATORS = { lt = "<", lte = "<=", gt = ">", gte = ">=", ne = "<>", eq = "=" }
+local PG_KEYWORDS =
+"ALL,ANALYSE,ANALYZE,AND,ANY,ARRAY,AS,ASC,ASYMMETRIC,AUTHORIZATION,BINARY,BOTH,CASE,CAST,CHECK,COLLATE,COLLATION,COLUMN,CONCURRENTLY,CONSTRAINT,CREATE,CROSS,CURRENT_CATALOG,CURRENT_DATE,CURRENT_ROLE,CURRENT_SCHEMA,CURRENT_TIME,CURRENT_TIMESTAMP,CURRENT_USER,DEFAULT,DEFERRABLE,DESC,DISTINCT,DO,ELSE,END,EXCEPT,FALSE,FETCH,FOR,FOREIGN,FREEZE,FROM,FULL,GRANT,GROUP,HAVING,ILIKE,IN,INITIALLY,INNER,INTERSECT,INTO,IS,ISNULL,JOIN,LATERAL,LEADING,LEFT,LIKE,LIMIT,LOCALTIME,LOCALTIMESTAMP,NATURAL,NOT,NOTNULL,NULL,OFFSET,ON,ONLY,OR,ORDER,OUTER,OVERLAPS,PLACING,PRIMARY,REFERENCES,RETURNING,RIGHT,SELECT,SESSION_USER,SIMILAR,SOME,SYMMETRIC,TABLE,TABLESAMPLE,THEN,TO,TRAILING,TRUE,UNION,UNIQUE,USER,USING,VARIADIC,VERBOSE,WHEN,WHERE,WINDOW,WITH"
+local IS_PG_KEYWORDS = utils.from_entries(utils.map(split(PG_KEYWORDS, ","), function(e)
+  return { e, true }
+end))
+local non_merge_names = { sql = true, fields = true, field_names = true, extends = true, mixins = true, __index = true,
+  admin = true }
+local function model_ready_for_sql(model)
+  return model.table_name and model.field_names and model.fields
+end
+---@alias keys string|string[]
+local base_model = {
+  abstract = true,
+  field_names = array { "id", "ctime", "utime" },
+  fields = {
+    id = { type = "integer", primary_key = true, serial = true },
+    ctime = { label = "创建时间", type = "datetime", auto_now_add = true },
+    utime = { label = "更新时间", type = "datetime", auto_now = true }
+  }
+}
+local function check_reserved(name)
+  assert(type(name) == "string", string_format("name must by string, not %s (%s)", type(name), name))
+  assert(not name:find("__", 1, true), "don't use __ in a field name")
+  assert(not IS_PG_KEYWORDS[name:upper()], string_format("%s is a postgresql reserved word", name))
+end
+
+local function normalize_array_and_hash_fields(fields)
+  assert(type(fields) == "table", "you must provide fields for a model")
+  local aligned_fields = {}
+  for name, field in pairs(fields) do
+    if type(name) == 'number' then
+      assert(field.name, "you must define name for a field when using array fields")
+      aligned_fields[field.name] = field
+    else
+      aligned_fields[name] = field
+    end
+  end
+  return aligned_fields
+end
+
+local function normalize_field_names(field_names)
+  assert(type(field_names) == "table", "you must provide field_names for a model")
+  for _, name in ipairs(field_names) do
+    assert(type(name) == 'string', "element of field_names must be string")
+  end
+  return array(field_names)
+end
+
+local function is_field_class(t)
+  return type(t) == 'table' and getmetatable(t) and getmetatable(t).__is_field_class__
+end
+
+local function model_new(cls, attrs)
+  return cls:new(attrs)
+end
+
+local function model_caller(cls, options)
+  return cls:make_class(options)
+end
+
 
 local function get_foreign_object(attrs, prefix)
   -- when in : attrs = {id=1, buyer__name='tom', buyer__id=2}, prefix = 'buyer__'
@@ -58,6 +125,62 @@ local function get_foreign_object(attrs, prefix)
   return fk
 end
 
+local function make_model_instance_meta(model, cls)
+  local meta = {}
+  function meta.__call(self, data)
+    for k, v in pairs(data) do
+      self[k] = v
+    end
+    return self
+  end
+
+  function meta.delete(self, key)
+    key = key or model.primary_key
+    return cls.delete(model, { [key] = self[key] }):exec()
+  end
+
+  function meta.save(self, names, key)
+    return cls.save(model, self, names, key)
+  end
+
+  function meta.save_create(self, names, key)
+    return cls.save_create(model, self, names, key)
+  end
+
+  function meta.save_update(self, names, key)
+    return cls.save_update(model, self, names, key)
+  end
+
+  function meta.save_from(self, key)
+    return cls.save_from(model, self, key)
+  end
+
+  function meta.create_from(self, key)
+    return cls.create_from(model, self, key)
+  end
+
+  function meta.update_from(self, key)
+    return cls.update_from(model, self, key)
+  end
+
+  function meta.validate(self, names, key)
+    return cls.validate(model, self, names, key)
+  end
+
+  function meta.validate_update(self, names)
+    return cls.validate_update(model, self, names)
+  end
+
+  function meta.validate_create(self, names)
+    return cls.validate_create(model, self, names)
+  end
+
+  return setmetatable(meta, model)
+end
+---comment
+---@param rows rows
+---@param key keys
+---@return rows?, keys?
 local function check_upsert_key(rows, key)
   assert(key, "no key for upsert")
   if rows[1] then
@@ -322,6 +445,14 @@ end
 
 ---@class Sql
 local Sql = {}
+---make a Sql instance
+---@param cls ModelSql
+---@param self? table
+---@return ModelSql
+function Sql.new(cls, self)
+  return setmetatable(self or {}, cls)
+end
+
 ---@param self ModelSql
 ---@param a dbvalue
 ---@param b? dbvalue
@@ -337,9 +468,10 @@ function Sql.select(self, a, b, ...)
   return self
 end
 
+
 ---comment
 ---@param self ModelSql
----@param rows row|row[]|Sql
+---@param rows rows|ModelSql
 ---@param columns? string[]
 ---@return ModelSql
 function Sql.insert(self, rows, columns)
@@ -355,12 +487,12 @@ function Sql.insert(self, rows, columns)
     elseif next(rows) ~= nil then
       self._insert = self:_get_insert_token(rows, columns)
     else
-      error("can't pass empty table to sql.insert")
+      error("can't pass empty table to Sql.insert")
     end
   elseif type(rows) == 'string' then
     self._insert = rows
   else
-    error("invalid value type to sql.insert:" .. type(rows))
+    error("invalid value type to Sql.insert:" .. type(rows))
   end
   return self
 end
@@ -384,7 +516,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows row[]
----@param keys string|string[]
+---@param keys keys
 ---@return ModelSql
 function Sql.merge_gets(self, rows, keys)
   -- {{id=1}, {id=2}, {id=3}} => columns: {'id'}
@@ -400,7 +532,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows row[]
----@param key string|string[]
+---@param key keys
 ---@param columns string[]
 ---@return ModelSql
 function Sql.merge(self, rows, key, columns)
@@ -430,7 +562,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows row[]
----@param key string|string[]
+---@param key keys
 ---@param columns? string[]
 ---@return ModelSql
 function Sql.upsert(self, rows, key, columns)
@@ -448,8 +580,8 @@ end
 
 ---comment
 ---@param self ModelSql
----@param rows row[]|Sql
----@param key string|string[]
+---@param rows row[]|ModelSql
+---@param key keys
 ---@param columns string[]
 ---@return ModelSql
 function Sql.updates(self, rows, key, columns)
@@ -488,7 +620,8 @@ function Sql.gets(self, keys, columns)
   local cte_values = string_format("(VALUES %s)", as_token(keys))
   return self:with(cte_name, cte_values):right_join("V", join_cond)
 end
-
+---@param self ModelSql
+---@return ModelSql
 function Sql.join(self, ...)
   local join_token = self:_get_inner_join(...)
   self._from = string_format("%s %s", self._from or self:get_table(), join_token)
@@ -496,19 +629,22 @@ function Sql.join(self, ...)
 end
 
 function Sql.inner_join(self, ...) return self:join(...) end
-
+---@param self ModelSql
+---@return ModelSql
 function Sql.left_join(self, ...)
   local join_token = self:_get_left_join(...)
   self._from = string_format("%s %s", self._from or self:get_table(), join_token)
   return self
 end
-
+---@param self ModelSql
+---@return ModelSql
 function Sql.right_join(self, ...)
   local join_token = self:_get_right_join(...)
   self._from = string_format("%s %s", self._from or self:get_table(), join_token)
   return self
 end
-
+---@param self ModelSql
+---@return ModelSql
 function Sql.full_join(self, ...)
   local join_token = self:_get_full_join(...)
   self._from = string_format("%s %s", self._from or self:get_table(), join_token)
@@ -718,6 +854,7 @@ end
 ---@field table_name string
 ---@field fields table
 ---@field field_names string[]
+---@field auto_now_name string
 ---@field foreign_keys table
 ---@field name_cache {[string]:string}
 ---@field query function
@@ -902,13 +1039,11 @@ function ModelSql.make_model_class(cls, model)
   if not_abstract and not pk_defined and not model.disable_auto_primary_key then
     local pk_name = model.default_primary_key or "id"
     model.primary_key = pk_name
-    model.fields[pk_name] = FieldClasses.integer { name = pk_name, primary_key = true, serial = true }
+    model.fields[pk_name] = Field.integer { name = pk_name, primary_key = true, serial = true }
     table.insert(model.field_names, 1, pk_name)
   end
   -- sql
-  if not_abstract and not model.sql and model_ready_for_sql(model) then
-    model.sql = modelsql:make_class { model = model, table_name = model.table_name }
-  end
+
   if not_abstract then
     model.name_cache = {}
   end
@@ -920,7 +1055,7 @@ function ModelSql.make_model_class(cls, model)
     if not_abstract then
       model.name_cache[name] = model.table_name .. "." .. name
     end
-    if field.db_type == FieldClasses.basefield.NOT_DEFIEND then
+    if field.db_type == Field.basefield.NOT_DEFIEND then
       field.db_type = model.fields[field.reference_column].db_type
     end
   end
@@ -1007,7 +1142,7 @@ function ModelSql.all(cls)
   for i = 1, #records do
     records[i] = cls:load(records[i])
   end
-  return setmetatable(records, jsobject)
+  return setmetatable(records, array)
 end
 
 function ModelSql.save(cls, input, names, key)
@@ -1054,7 +1189,7 @@ function ModelSql.create_from(cls, data, key)
   if prepared == nil then
     return nil, err
   end
-  local created = sql.insert(cls.sql:new {}, prepared):returning(key):execr()
+  local created = Sql.insert(cls:new {}, prepared):returning(key):execr()
   data[key] = created[1][key]
   return cls:new(data)
 end
@@ -1067,7 +1202,7 @@ function ModelSql.update_from(cls, data, key)
   end
   local look_value = assert(data[key], "no key provided for update")
   local ok, res = pcall(function()
-    return sql.update(cls.sql:new {}, prepared):where { [key] = look_value }:execr()
+    return Sql.update(cls:new {}, prepared):where { [key] = look_value }:execr()
   end)
   if ok then
     if res.affected_rows == 1 then
@@ -1109,12 +1244,6 @@ function ModelSql.prepare_for_db(cls, data, columns, is_update)
   return prepared
 end
 
-function ModelSql.skip_validate(cls, bool)
-  if bool == nil then
-    bool = true
-  end
-  return cls.sql:new():skip_validate(not not bool)
-end
 
 function ModelSql.validate(cls, input, names, key)
   if rawget(input, key or cls.primary_key) ~= nil then
@@ -1193,10 +1322,14 @@ function ModelSql.validate_update(cls, input, names)
     end
   end
 end
-
+---comment
+---@param cls ModelSql
+---@param rows rows
+---@param columns string[]?
+---@return table?, string[]?
 function ModelSql.validate_create_data(cls, rows, columns)
   local err_obj, cleaned
-  columns = columns or cls.sql:_get_keys(rows)
+  columns = columns or cls:_get_keys(rows)
   if rows[1] then
     cleaned = {}
     for i, row in ipairs(rows) do
@@ -1218,7 +1351,7 @@ end
 
 function ModelSql.validate_update_data(cls, rows, columns)
   local err_obj, cleaned
-  columns = columns or cls.sql:_get_keys(rows)
+  columns = columns or cls:_get_keys(rows)
   if rows[1] then
     cleaned = {}
     for i, row in ipairs(rows) do
@@ -1237,17 +1370,22 @@ function ModelSql.validate_update_data(cls, rows, columns)
   end
   return cleaned, columns
 end
-
+---comment
+---@param cls ModelSql
+---@param rows rows
+---@param key keys?
+---@param columns string[]?
+---@return rows?, keys?, string[]?
 function ModelSql.validate_create_rows(cls, rows, key, columns)
-  rows, key = check_upsert_key(rows, key or cls.primary_key)
-  if rows == nil then
-    return nil, key
+  local rows2, key2 = check_upsert_key(rows, key or cls.primary_key)
+  if rows2 == nil then
+    return nil, key2
   end
-  rows, columns = cls:validate_create_data(rows, columns)
-  if rows == nil then
+  rows2, columns = cls:validate_create_data(rows2, columns)
+  if rows2 == nil then
     return nil, columns
   end
-  return rows, key, columns
+  return rows2, key2, columns
 end
 
 
@@ -1297,10 +1435,15 @@ function ModelSql.validate_update_rows(cls, rows, key, columns)
   end
   return rows, key, columns
 end
-
+---comment
+---@param cls ModelSql
+---@param rows rows
+---@param columns keys?
+---@param is_update boolean?
+---@return table?, keys?
 function ModelSql.prepare_db_rows(cls, rows, columns, is_update)
   local err, cleaned
-  columns = columns or cls.sql:_get_keys(rows)
+  columns = columns or cls:_get_keys(rows)
   if rows[1] then
     cleaned = {}
     for i, row in ipairs(rows) do
@@ -1445,7 +1588,7 @@ end
 ---use V as data table name so both ModelSql.upsert and ModelSql.merge can use it.
 ---@param self ModelSql
 ---@param columns string[]
----@param key string|string[]
+---@param key keys
 ---@param table_name string
 ---@return string
 function ModelSql._get_update_token_with_prefix(self, columns, key, table_name)
@@ -1622,7 +1765,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param row row
----@param key string|string[]
+---@param key keys
 ---@param columns? string[]
 ---@return string
 function ModelSql._get_upsert_token(self, row, key, columns)
@@ -1640,7 +1783,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows row[]
----@param key string|string[]
+---@param key keys
 ---@param columns? string[]
 ---@return string
 function ModelSql._get_bulk_upsert_token(self, rows, key, columns)
@@ -1658,7 +1801,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows ModelSql
----@param key string|string[]
+---@param key keys
 ---@param columns string[]
 ---@return string
 function ModelSql._get_upsert_query_token(self, rows, key, columns)
@@ -1743,7 +1886,7 @@ end
 
 ---comment
 ---@param self ModelSql
----@param cols string|string[]
+---@param cols keys
 ---@param range ModelSql|table|string
 ---@param operator? string
 ---@return string
@@ -1771,7 +1914,7 @@ function ModelSql._get_update_query_token(self, sub_select, columns)
 end
 
 ---@param self ModelSql
----@param key string|string[]
+---@param key keys
 ---@param left_table string
 ---@param right_table string
 ---@return string
@@ -2226,7 +2369,7 @@ end
 
 ---comment
 ---@param self ModelSql
----@param rows row|row[]|ModelSql
+---@param rows rows|ModelSql
 ---@param columns? string[]
 ---@return ModelSql
 function ModelSql.insert(self, rows, columns)
@@ -2285,8 +2428,8 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows row[]
----@param key string|string[]
----@param columns string[]
+---@param key keys?
+---@param columns string[]?
 ---@return ModelSql
 function ModelSql.merge(self, rows, key, columns)
   if #rows == 0 then
@@ -2317,7 +2460,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows row[]
----@param key string|string[]
+---@param key keys
 ---@param columns string[]
 ---@return ModelSql
 function ModelSql.upsert(self, rows, key, columns)
@@ -2349,7 +2492,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows row[]|ModelSql
----@param key string|string[]
+---@param key keys
 ---@param columns string[]
 ---@return ModelSql
 function ModelSql.updates(self, rows, key, columns)
@@ -2381,7 +2524,7 @@ end
 ---comment
 ---@param self ModelSql
 ---@param rows row[]
----@param keys string|string[]
+---@param keys keys
 ---@return ModelSql
 function ModelSql.merge_gets(self, rows, keys)
   local columns = self:_get_keys(rows[1])

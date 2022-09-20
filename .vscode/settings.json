@@ -1,0 +1,11 @@
+{
+  "Lua.runtime.version": "LuaJIT",
+  "Lua.diagnostics.globals": [
+    "ngx"
+  ],
+  "Lua.workspace.library": [
+    "${3rd}/OpenResty/library"
+  ],
+  "editor.formatOnPaste": false,
+  "Lua.workspace.checkThirdParty": false
+}
