@@ -1,7 +1,8 @@
 {
   "Lua.runtime.version": "LuaJIT",
   "Lua.diagnostics.globals": [
-    "ngx"
+    "ngx",
+    "table.new",
   ],
   "Lua.workspace.library": [
     "${3rd}/OpenResty/library"

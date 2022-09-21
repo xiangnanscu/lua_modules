@@ -4,7 +4,6 @@
 -- https://www.postgreSql.org/docs/current/sql-delete.html
 local array = require "xodel.array"
 local object = require "xodel.object"
-local utils = require "xodel.utils"
 local Field = require "xodel.field"
 local nkeys = require "table.nkeys"
 local setmetatable = setmetatable
@@ -35,11 +34,12 @@ local split = ngx_re.split
 
 local table_new, clone, NULL
 if ngx then
+  ---@diagnostic disable-next-line: undefined-field
   table_new = table.new
   clone = require("table.clone")
   NULL = ngx.null
 else
-  table_new = function(a, b)
+  table_new = function()
     return {}
   end
   clone = function(t)
@@ -60,15 +60,26 @@ local FOREIGN_KEY = 2
 local NON_FOREIGN_KEY = 3
 local END = 4
 local COMPARE_OPERATORS = { lt = "<", lte = "<=", gt = ">", gte = ">=", ne = "<>", eq = "=" }
-local PG_KEYWORDS =
-"ALL,ANALYSE,ANALYZE,AND,ANY,ARRAY,AS,ASC,ASYMMETRIC,AUTHORIZATION,BINARY,BOTH,CASE,CAST,CHECK,COLLATE,COLLATION,COLUMN,CONCURRENTLY,CONSTRAINT,CREATE,CROSS,CURRENT_CATALOG,CURRENT_DATE,CURRENT_ROLE,CURRENT_SCHEMA,CURRENT_TIME,CURRENT_TIMESTAMP,CURRENT_USER,DEFAULT,DEFERRABLE,DESC,DISTINCT,DO,ELSE,END,EXCEPT,FALSE,FETCH,FOR,FOREIGN,FREEZE,FROM,FULL,GRANT,GROUP,HAVING,ILIKE,IN,INITIALLY,INNER,INTERSECT,INTO,IS,ISNULL,JOIN,LATERAL,LEADING,LEFT,LIKE,LIMIT,LOCALTIME,LOCALTIMESTAMP,NATURAL,NOT,NOTNULL,NULL,OFFSET,ON,ONLY,OR,ORDER,OUTER,OVERLAPS,PLACING,PRIMARY,REFERENCES,RETURNING,RIGHT,SELECT,SESSION_USER,SIMILAR,SOME,SYMMETRIC,TABLE,TABLESAMPLE,THEN,TO,TRAILING,TRUE,UNION,UNIQUE,USER,USING,VARIADIC,VERBOSE,WHEN,WHERE,WINDOW,WITH"
-local IS_PG_KEYWORDS = utils.from_entries(utils.map(split(PG_KEYWORDS, ","), function(e)
-  return { e, true }
-end))
-local non_merge_names = { sql = true, fields = true, field_names = true, extends = true, mixins = true, __index = true,
+local PG_KEYWORDS = "ALL,ANALYSE,ANALYZE,AND,ANY,ARRAY,AS,ASC,ASYMMETRIC,AUTHORIZATION,BINARY,BOTH,CASE,CAST,CHECK,COLLATE,COLLATION,COLUMN,CONCURRENTLY,CONSTRAINT,CREATE,CROSS,CURRENT_CATALOG,CURRENT_DATE,CURRENT_ROLE,CURRENT_SCHEMA,CURRENT_TIME,CURRENT_TIMESTAMP,CURRENT_USER,DEFAULT,DEFERRABLE,DESC,DISTINCT,DO,ELSE,END,EXCEPT,FALSE,FETCH,FOR,FOREIGN,FREEZE,FROM,FULL,GRANT,GROUP,HAVING,ILIKE,IN,INITIALLY,INNER,INTERSECT,INTO,IS,ISNULL,JOIN,LATERAL,LEADING,LEFT,LIKE,LIMIT,LOCALTIME,LOCALTIMESTAMP,NATURAL,NOT,NOTNULL,NULL,OFFSET,ON,ONLY,OR,ORDER,OUTER,OVERLAPS,PLACING,PRIMARY,REFERENCES,RETURNING,RIGHT,SELECT,SESSION_USER,SIMILAR,SOME,SYMMETRIC,TABLE,TABLESAMPLE,THEN,TO,TRAILING,TRUE,UNION,UNIQUE,USER,USING,VARIADIC,VERBOSE,WHEN,WHERE,WINDOW,WITH"
+local IS_PG_KEYWORDS = {}
+for _, KW in ipairs(split(PG_KEYWORDS, ",")) do
+  IS_PG_KEYWORDS[KW] = true
+end
+local NON_MERGE_NAMES = { sql = true, fields = true, field_names = true, extends = true, mixins = true, __index = true,
   admin = true }
 local function model_ready_for_sql(model)
   return model.table_name and model.field_names and model.fields
+end
+
+local function dict(a, b)
+  local res = {}
+  for key, value in pairs(a) do
+    res[key] = value
+  end
+  for key, value in pairs(b) do
+    res[key] = value
+  end
+  return res
 end
 
 local base_model = {
@@ -117,7 +128,7 @@ local function model_new(cls, attrs)
 end
 
 local function model_caller(cls, options)
-  return cls:make_class(options)
+  return cls:create_model(options)
 end
 
 local function get_foreign_object(attrs, prefix)
@@ -206,7 +217,7 @@ local function check_upsert_key(rows, key)
         end
       end
     else
-      for i, row in ipairs(rows) do
+      for _, row in ipairs(rows) do
         local empty_keys = true
         for _, k in ipairs(key) do
           if not (row[k] == nil or row[k] == '') then
@@ -236,7 +247,7 @@ local function check_upsert_key(rows, key)
 end
 
 local function make_field_from_json(json, kwargs)
-  local options = utils.dict(json, kwargs)
+  local options = dict(json, kwargs)
   if not options.type then
     if options.reference then
       options.type = "foreignkey"
@@ -333,7 +344,7 @@ local function _prefix_with_V(column)
   return "V." .. column
 end
 
----check if row a ModelSql instance
+---check if row a Xodel instance
 ---@param row table
 ---@return boolean
 local function is_sql_instance(row)
@@ -373,7 +384,7 @@ local function _escape_factory(is_literal, is_bracket)
           return token
         end
       else
-        error("empty table as a ModelSql value is not allowed")
+        error("empty table as a Xodel value is not allowed")
       end
     elseif NULL == value then
       return 'NULL'
@@ -456,18 +467,18 @@ end
 ---@class Sql
 local Sql = {}
 ---make a Sql instance
----@param cls ModelSql
+---@param cls Xodel
 ---@param self? table
----@return ModelSql
+---@return Xodel
 function Sql.new(cls, self)
   return setmetatable(self or {}, cls)
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param a DBValue
 ---@param b? DBValue
 ---@param ...? DBValue[]
----@return ModelSql
+---@return Xodel
 function Sql.select(self, a, b, ...)
   local s = self:_get_select_token(a, b, ...)
   if not self._select then
@@ -479,14 +490,14 @@ function Sql.select(self, a, b, ...)
 end
 
 ---comment
----@param self ModelSql
----@param rows Records|ModelSql
+---@param self Xodel
+---@param rows Records|Xodel
 ---@param columns? string[]
----@return ModelSql
+---@return Xodel
 function Sql.insert(self, rows, columns)
   if type(rows) == "table" then
     if self:is_instance(rows) then
-      ---@cast rows ModelSql
+      ---@cast rows Xodel
       if rows._select then
         self:_set_select_subquery_insert_token(rows, columns)
       else
@@ -508,13 +519,13 @@ function Sql.insert(self, rows, columns)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param row Record|string|Sql
 ---@param columns? string[]
----@return ModelSql
+---@return Xodel
 function Sql.update(self, row, columns)
   if self:is_instance(row) then
-    self._update = self:_get_update_query_token(row--[[@as ModelSql]] , columns)
+    self._update = self:_get_update_query_token(row--[[@as Xodel]] , columns)
   elseif type(row) == "table" then
     self._update = self:_get_update_token(row, columns)
   else
@@ -524,10 +535,10 @@ function Sql.update(self, row, columns)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param keys Keys
----@return ModelSql
+---@return Xodel
 function Sql.merge_gets(self, rows, keys)
   -- {{id=1}, {id=2}, {id=3}} => columns: {'id'}
   -- each row of keys must be the same struct, so get columns from first row
@@ -540,11 +551,11 @@ function Sql.merge_gets(self, rows, keys)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param key Keys
 ---@param columns string[]
----@return ModelSql
+---@return Xodel
 function Sql.merge(self, rows, key, columns)
   if #rows == 0 then
     error("empty rows passed to merge")
@@ -570,11 +581,11 @@ function Sql.merge(self, rows, key, columns)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param key Keys
 ---@param columns? string[]
----@return ModelSql
+---@return Xodel
 function Sql.upsert(self, rows, key, columns)
   assert(key, "you must provide key for upsert(string or table)")
   if self:is_instance(rows) then
@@ -589,11 +600,11 @@ function Sql.upsert(self, rows, key, columns)
 end
 
 ---comment
----@param self ModelSql
----@param rows Record[]|ModelSql
+---@param self Xodel
+---@param rows Record[]|Xodel
 ---@param key Keys
 ---@param columns string[]
----@return ModelSql
+---@return Xodel
 function Sql.updates(self, rows, key, columns)
   if self:is_instance(rows) then
     columns = columns or flat(rows._returning_args)
@@ -615,10 +626,10 @@ end
 
 --- {{id=1}, {id=2}, {id=3}} => columns: {'id'}  keys: {{1},{2},{3}}
 --- each row of keys must be the same struct, so get columns from first row
----@param self ModelSql
+---@param self Xodel
 ---@param keys Record[]
 ---@param columns? string[]
----@return ModelSql
+---@return Xodel
 function Sql.gets(self, keys, columns)
   if #keys == 0 then
     error("empty keys passed to gets")
@@ -631,8 +642,8 @@ function Sql.gets(self, keys, columns)
   return self:with(cte_name, cte_values):right_join("V", join_cond)
 end
 
----@param self ModelSql
----@return ModelSql
+---@param self Xodel
+---@return Xodel
 function Sql.join(self, ...)
   local join_token = self:_get_inner_join(...)
   self._from = string_format("%s %s", self._from or self:get_table(), join_token)
@@ -641,31 +652,31 @@ end
 
 function Sql.inner_join(self, ...) return self:join(...) end
 
----@param self ModelSql
----@return ModelSql
+---@param self Xodel
+---@return Xodel
 function Sql.left_join(self, ...)
   local join_token = self:_get_left_join(...)
   self._from = string_format("%s %s", self._from or self:get_table(), join_token)
   return self
 end
 
----@param self ModelSql
----@return ModelSql
+---@param self Xodel
+---@return Xodel
 function Sql.right_join(self, ...)
   local join_token = self:_get_right_join(...)
   self._from = string_format("%s %s", self._from or self:get_table(), join_token)
   return self
 end
 
----@param self ModelSql
----@return ModelSql
+---@param self Xodel
+---@return Xodel
 function Sql.full_join(self, ...)
   local join_token = self:_get_full_join(...)
   self._from = string_format("%s %s", self._from or self:get_table(), join_token)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param kwargs {[string|number]:any}
 ---@param logic? string
 ---@return string
@@ -688,7 +699,7 @@ function Sql._get_condition_token_from_table(self, kwargs, logic)
   end
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param a table|string|function
 ---@param b? DBValue
 ---@param c? DBValue
@@ -730,7 +741,7 @@ function Sql._get_condition_token(self, a, b, c)
   end
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.where_in(self, cols, range)
   local in_token = self:_get_in_token(cols, range)
   if self._where then
@@ -741,7 +752,7 @@ function Sql.where_in(self, cols, range)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.where_not_in(self, cols, range)
   local not_in_token = self:_get_in_token(cols, range, "NOT IN")
   if self._where then
@@ -752,7 +763,7 @@ function Sql.where_not_in(self, cols, range)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.where_null(self, col)
   if self._where then
     self._where = string_format("(%s) AND %s IS NULL", self._where, col)
@@ -762,7 +773,7 @@ function Sql.where_null(self, col)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.where_not_null(self, col)
   if self._where then
     self._where = string_format("(%s) AND %s IS NOT NULL", self._where, col)
@@ -772,7 +783,7 @@ function Sql.where_not_null(self, col)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.where_between(self, col, low, high)
   if self._where then
     self._where = string_format("(%s) AND (%s BETWEEN %s AND %s)", self._where, col, low, high)
@@ -782,7 +793,7 @@ function Sql.where_between(self, col, low, high)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.where_not_between(self, col, low, high)
   if self._where then
     self._where = string_format("(%s) AND (%s NOT BETWEEN %s AND %s)", self._where, col, low, high)
@@ -792,7 +803,7 @@ function Sql.where_not_between(self, col, low, high)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.or_where_in(self, cols, range)
   local in_token = self:_get_in_token(cols, range)
   if self._where then
@@ -803,7 +814,7 @@ function Sql.or_where_in(self, cols, range)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.or_where_not_in(self, cols, range)
   local not_in_token = self:_get_in_token(cols, range, "NOT IN")
   if self._where then
@@ -814,7 +825,7 @@ function Sql.or_where_not_in(self, cols, range)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.or_where_null(self, col)
   if self._where then
     self._where = string_format("%s OR %s IS NULL", self._where, col)
@@ -824,7 +835,7 @@ function Sql.or_where_null(self, col)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.or_where_not_null(self, col)
   if self._where then
     self._where = string_format("%s OR %s IS NOT NULL", self._where, col)
@@ -834,7 +845,7 @@ function Sql.or_where_not_null(self, col)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.or_where_between(self, col, low, high)
   if self._where then
     self._where = string_format("%s OR (%s BETWEEN %s AND %s)", self._where, col, low, high)
@@ -844,7 +855,7 @@ function Sql.or_where_between(self, col, low, high)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 function Sql.or_where_not_between(self, col, low, high)
   if self._where then
     self._where = string_format("%s OR (%s NOT BETWEEN %s AND %s)", self._where, col, low, high)
@@ -863,7 +874,7 @@ function SqlMeta.__call(cls, kwargs)
   end
 end
 
----@class ModelSql
+---@class Xodel
 ---@field Sql  Sql
 ---@field table_name string
 ---@field fields table
@@ -901,13 +912,13 @@ end
 ---@field _order?  string
 ---@field _limit?  number
 ---@field _offset?  number
----@field _union?  ModelSql | string
----@field _union_all?  ModelSql | string
----@field _except?  ModelSql | string
----@field _except_all?  ModelSql | string
----@field _intersect?  ModelSql | string
----@field _intersect_all?  ModelSql | string
-local ModelSql = setmetatable({
+---@field _union?  Xodel | string
+---@field _union_all?  Xodel | string
+---@field _except?  Xodel | string
+---@field _except_all?  Xodel | string
+---@field _intersect?  Xodel | string
+---@field _intersect_all?  Xodel | string
+local Xodel = setmetatable({
   __SQL_BUILDER__ = true,
   r = make_raw_token,
   DEFAULT = DEFAULT,
@@ -915,30 +926,45 @@ local ModelSql = setmetatable({
   as_token = as_token,
   as_literal = as_literal,
 }, SqlMeta)
-ModelSql.__index = ModelSql
-function ModelSql.__tostring(self)
+Xodel.__index = Xodel
+function Xodel.__tostring(self)
   return self:statement()
 end
 
-function ModelSql.__call(cls, ...)
+function Xodel.__call(cls, ...)
   return cls.new(cls, ...)
 end
 
----make a ModelSql instance
----@param cls ModelSql
+---make a Xodel instance
+---@param cls Xodel
 ---@param self? table
----@return ModelSql
-function ModelSql.new(cls, self)
+---@return Xodel
+function Xodel.new(cls, self)
   return setmetatable(self or {}, cls)
 end
 
-function ModelSql.make_class(cls, options)
+function Xodel.create_model(cls, options)
   -- foreign_keys, label_to_name, name_to_label, primary_key, disable_auto_primary_key
   -- abstract, sql, query, table_name, field_names, fields, extends, mixins
   return cls:make_model_class(cls:normalize(options))
 end
 
-function ModelSql.normalize(cls, options)
+---@class ModelOpts
+---@field __normalized__? boolean
+---@field extends? table
+---@field table_name? string
+---@field fields {[string]:table}
+---@field field_names string[]
+---@field mixins? table[]
+---@field abstract? boolean
+---@field disable_auto_primary_key? boolean
+---@field primary_key string
+---@field default_primary_key? string
+
+---@param cls Xodel
+---@param options ModelOpts
+---@return ModelOpts
+function Xodel.normalize(cls, options)
   assert(type(options) == "table", "model must be a table")
   -- **或更详细的empty判断逻辑(即检测是否定义了任一值: extends, mixins, able_name, field_names, fields等)
   assert(next(options), "model must not be empty")
@@ -972,10 +998,10 @@ function ModelSql.normalize(cls, options)
       if extends then
         local pfield = extends.fields[name]
         if pfield then
-          field = utils.dict(pfield:get_options(), field)
+          field = dict(pfield:get_options(), field)
           if pfield.model and field.model then
             -- ** 这里选择extends而非mixins, 有待观察
-            field.model = cls:make_class {
+            field.model = cls:create_model {
               abstract = true,
               extends = pfield.model,
               fields = field.model.fields,
@@ -997,7 +1023,7 @@ function ModelSql.normalize(cls, options)
     end
   end
   for key, value in pairs(options) do
-    if model[key] == nil and not non_merge_names[key] then
+    if model[key] == nil and not NON_MERGE_NAMES[key] then
       model[key] = value
     end
   end
@@ -1016,7 +1042,30 @@ function ModelSql.normalize(cls, options)
   end
 end
 
-function ModelSql.make_model_class(cls, model)
+---@class ModelClass
+---@field __index ModelClass
+---@field __is_model_class__? boolean
+---@field instance_meta table
+---@field table_name string
+---@field auto_now_name? string
+---@field disable_auto_primary_key? boolean
+---@field primary_key string
+---@field default_primary_key? string
+---@field name_cache {[string]:string}
+---@field name_to_label {[string]:string}
+---@field label_to_name {[string]:string}
+---@field fields {[string]:table}
+---@field field_names string[]
+---@field names string[]
+---@field mixins? table[]
+---@field abstract? boolean
+---@field foreign_keys {[string]:table}
+
+---comment
+---@param cls Xodel
+---@param model ModelOpts
+---@return ModelClass|ModelOpts
+function Xodel.make_model_class(cls, model)
   -- set foreign_keys, names, auto_now_name, primary_key, sql, name_cache, name_to_label, label_to_name
   -- __index, __is_model_class__, instance_meta
   setmetatable(model, cls)
@@ -1085,16 +1134,16 @@ function ModelSql.make_model_class(cls, model)
   return model
 end
 
-function ModelSql.mix_with_base(cls, ...)
+function Xodel.mix_with_base(cls, ...)
   return cls:mix(base_model, ...)
 end
 
-function ModelSql.mix(cls, ...)
+function Xodel.mix(cls, ...)
   local models = array { ... }
   if #models == 1 then
     -- 只有一个model, reduce不会调用merge_model_fn, 所以手动处理
     -- ** 或者此处考虑直接报错, 因为1个model混合个啥?
-    return cls:make_class(models[1])
+    return cls:create_model(models[1])
   elseif #models > 1 then
     return cls:make_model_class(cls:merge_models(models))
   else
@@ -1102,15 +1151,15 @@ function ModelSql.mix(cls, ...)
   end
 end
 
-function ModelSql.merge_model_fn(a, b)
-  return ModelSql:merge_model(a, b)
+function Xodel.merge_model_fn(a, b)
+  return Xodel:merge_model(a, b)
 end
 
-function ModelSql.merge_models(cls, models)
+function Xodel.merge_models(cls, models)
   return array(models):reduce(cls.merge_model_fn)
 end
 
-function ModelSql.merge_model(cls, a, b)
+function Xodel.merge_model(cls, a, b)
   local A = a.__normalized__ and a or cls:normalize(a)
   local B = b.__normalized__ and b or cls:normalize(b)
   local C = {}
@@ -1120,7 +1169,7 @@ function ModelSql.merge_model(cls, a, b)
     local a_field = A.fields[name]
     local b_field = B.fields[name]
     if a_field and b_field then
-      fields[name] = ModelSql:merge_field(a_field, b_field)
+      fields[name] = Xodel:merge_field(a_field, b_field)
     elseif a_field then
       fields[name] = a_field
     else
@@ -1130,7 +1179,7 @@ function ModelSql.merge_model(cls, a, b)
   -- merge的时候abstract应该当做可合并的属性
   for i, M in ipairs { A, B } do
     for key, value in pairs(M) do
-      if not non_merge_names[key] then
+      if not NON_MERGE_NAMES[key] then
         C[key] = value
       end
     end
@@ -1140,21 +1189,21 @@ function ModelSql.merge_model(cls, a, b)
   return cls:normalize(C)
 end
 
-function ModelSql.merge_field(cls, a, b)
+function Xodel.merge_field(cls, a, b)
   local aopts = a.__is_field_class__ and a:get_options() or clone(a)
   local bopts = b.__is_field_class__ and b:get_options() or clone(b)
-  local options = utils.dict(aopts, bopts)
+  local options = dict(aopts, bopts)
   if aopts.model and bopts.model then
     options.model = cls:merge_model(aopts.model, bopts.model)
   end
   return make_field_from_json(options)
 end
 
--- function ModelSql.new(cls, attrs)
+-- function Xodel.new(cls, attrs)
 --   return setmetatable(attrs or {}, cls.instance_meta)
 -- end
 
-function ModelSql.all(cls)
+function Xodel.all(cls)
   local records = assert(cls.query("SELECT * FROM " .. cls.table_name))
   for i = 1, #records do
     records[i] = cls:load(records[i])
@@ -1162,7 +1211,7 @@ function ModelSql.all(cls)
   return setmetatable(records, array)
 end
 
-function ModelSql.save(cls, input, names, key)
+function Xodel.save(cls, input, names, key)
   key = key or cls.primary_key
   if rawget(input, key) ~= nil then
     return cls:save_update(input, names, key)
@@ -1171,7 +1220,7 @@ function ModelSql.save(cls, input, names, key)
   end
 end
 
-function ModelSql.save_create(cls, input, names, key)
+function Xodel.save_create(cls, input, names, key)
   local data, err = cls:validate_create(input, names)
   if err then
     return nil, err
@@ -1180,7 +1229,7 @@ function ModelSql.save_create(cls, input, names, key)
   end
 end
 
-function ModelSql.save_update(cls, input, names, key)
+function Xodel.save_update(cls, input, names, key)
   local data, err = cls:validate_update(input, names)
   if err then
     return nil, err
@@ -1191,7 +1240,7 @@ function ModelSql.save_update(cls, input, names, key)
   end
 end
 
-function ModelSql.save_from(cls, data, key)
+function Xodel.save_from(cls, data, key)
   key = key or cls.primary_key
   if rawget(data, key) ~= nil then
     return cls:update_from(data, key)
@@ -1200,7 +1249,7 @@ function ModelSql.save_from(cls, data, key)
   end
 end
 
-function ModelSql.create_from(cls, data, key)
+function Xodel.create_from(cls, data, key)
   key = key or cls.primary_key
   local prepared, err = cls:prepare_for_db(data)
   if prepared == nil then
@@ -1211,7 +1260,7 @@ function ModelSql.create_from(cls, data, key)
   return cls:new(data)
 end
 
-function ModelSql.update_from(cls, data, key)
+function Xodel.update_from(cls, data, key)
   key = key or cls.primary_key
   local prepared, err = cls:prepare_for_db(data, nil, true)
   if prepared == nil then
@@ -1237,7 +1286,7 @@ function ModelSql.update_from(cls, data, key)
   end
 end
 
-function ModelSql.prepare_for_db(cls, data, columns, is_update)
+function Xodel.prepare_for_db(cls, data, columns, is_update)
   local prepared = {}
   for _, name in ipairs(columns or cls.names) do
     local field = cls.fields[name]
@@ -1262,19 +1311,20 @@ function ModelSql.prepare_for_db(cls, data, columns, is_update)
   return prepared
 end
 
-function ModelSql.validate(cls, input, names, key)
+function Xodel.validate(cls, input, names, key)
   if rawget(input, key or cls.primary_key) ~= nil then
     return cls:validate_update(input, names)
   else
     return cls:validate_create(input, names)
   end
 end
+
 ---comment
----@param cls ModelSql
+---@param cls Xodel
 ---@param input Record
 ---@param names string[]
 ---@return Record?, ValidateError?
-function ModelSql.validate_create(cls, input, names)
+function Xodel.validate_create(cls, input, names)
   local data = {}
   local value, err
   for _, name in ipairs(names or cls.names) do
@@ -1308,11 +1358,12 @@ function ModelSql.validate_create(cls, input, names)
     end
   end
 end
----@param cls ModelSql
+
+---@param cls Xodel
 ---@param input Record
 ---@param names string[]
 ---@return Record?, ValidateError?
-function ModelSql.validate_update(cls, input, names)
+function Xodel.validate_update(cls, input, names)
   local data = {}
   local value, err
   for _, name in ipairs(names or cls.names) do
@@ -1348,11 +1399,11 @@ function ModelSql.validate_update(cls, input, names)
 end
 
 ---comment
----@param cls ModelSql
+---@param cls Xodel
 ---@param rows Records
 ---@param columns string[]?
 ---@return Records?, string[]|ValidateError
-function ModelSql.validate_create_data(cls, rows, columns)
+function Xodel.validate_create_data(cls, rows, columns)
   local err_obj, cleaned
   columns = columns or cls:_get_keys(rows)
   if rows[1] then
@@ -1376,7 +1427,7 @@ function ModelSql.validate_create_data(cls, rows, columns)
   return cleaned, columns
 end
 
-function ModelSql.validate_update_data(cls, rows, columns)
+function Xodel.validate_update_data(cls, rows, columns)
   local err_obj, cleaned
   columns = columns or cls:_get_keys(rows)
   if rows[1] then
@@ -1399,12 +1450,12 @@ function ModelSql.validate_update_data(cls, rows, columns)
 end
 
 ---comment
----@param cls ModelSql
+---@param cls Xodel
 ---@param rows Records
 ---@param key Keys?
 ---@param columns string[]?
 ---@return Records?, Keys|ValidateError, string[]?
-function ModelSql.validate_create_rows(cls, rows, key, columns)
+function Xodel.validate_create_rows(cls, rows, key, columns)
   local rows2, key2 = check_upsert_key(rows, key or cls.primary_key)
   if rows2 == nil then
     return nil, key2
@@ -1416,7 +1467,7 @@ function ModelSql.validate_create_rows(cls, rows, key, columns)
   return rows2, key2, columns
 end
 
-function ModelSql.parse_error_message(cls, err)
+function Xodel.parse_error_message(cls, err)
   if type(err) == 'table' then
     return err
   end
@@ -1431,7 +1482,7 @@ function ModelSql.parse_error_message(cls, err)
   end
 end
 
-function ModelSql.load(cls, data)
+function Xodel.load(cls, data)
   local err
   for _, name in ipairs(cls.names) do
     local field = cls.fields[name]
@@ -1450,7 +1501,7 @@ function ModelSql.load(cls, data)
   return cls:new(data)
 end
 
-function ModelSql.validate_update_rows(cls, rows, key, columns)
+function Xodel.validate_update_rows(cls, rows, key, columns)
   rows, key = check_upsert_key(rows, key or cls.primary_key)
   if rows == nil then
     return nil, key
@@ -1463,12 +1514,12 @@ function ModelSql.validate_update_rows(cls, rows, key, columns)
 end
 
 ---comment
----@param cls ModelSql
+---@param cls Xodel
 ---@param rows Records
 ---@param columns Keys?
 ---@param is_update boolean?
 ---@return table?, Keys?
-function ModelSql.prepare_db_rows(cls, rows, columns, is_update)
+function Xodel.prepare_db_rows(cls, rows, columns, is_update)
   local err, cleaned
   columns = columns or cls:_get_keys(rows)
   if rows[1] then
@@ -1497,17 +1548,17 @@ function ModelSql.prepare_db_rows(cls, rows, columns, is_update)
   end
 end
 
-function ModelSql.pcall(self)
+function Xodel.pcall(self)
   self._pcall = true
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param err string|table
 ---@param level? number
 ---@return nil, string|table
 ---@return any
-function ModelSql.error(self, err, level)
+function Xodel.error(self, err, level)
   if self._pcall then
     return nil, err
   else
@@ -1516,10 +1567,10 @@ function ModelSql.error(self, err, level)
 end
 
 ---get keys array from a row or row array
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record|Records
 ---@return string[]
-function ModelSql._get_keys(self, rows)
+function Xodel._get_keys(self, rows)
   local columns = {}
   if rows[1] then
     local d = {}
@@ -1540,11 +1591,11 @@ function ModelSql._get_keys(self, rows)
 end
 
 ---convert rows to array of array that insert values use
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param columns string[]
 ---@return DBValue[][]
-function ModelSql._rows_to_array(self, rows, columns)
+function Xodel._rows_to_array(self, rows, columns)
   local c = #columns
   local n = #rows
   local res = table_new(n, 0)
@@ -1573,11 +1624,11 @@ function ModelSql._rows_to_array(self, rows, columns)
 end
 
 ---{name="kate", age=11} => "('kate', 11)", {"name", "age"}
----@param self ModelSql
+---@param self Xodel
 ---@param row Record
 ---@param columns? string[]
 ---@return string, string[]
-function ModelSql._get_insert_values_token(self, row, columns)
+function Xodel._get_insert_values_token(self, row, columns)
   local value_list = {}
   if not columns then
     columns = {}
@@ -1598,11 +1649,11 @@ function ModelSql._get_insert_values_token(self, row, columns)
   return as_literal(value_list), columns
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param columns? string[]
 ---@return string[], string[]
-function ModelSql._get_bulk_insert_values_token(self, rows, columns)
+function Xodel._get_bulk_insert_values_token(self, rows, columns)
   columns = columns or self:_get_keys(rows)
   rows = self:_rows_to_array(rows, columns)
   return map(rows, as_literal), columns
@@ -1610,13 +1661,13 @@ end
 
 ---f({'a','b','c'}, 'a', 'V') => 'b = V.b, c = V.c'
 ---f({'a','b','c'}, {'a','b'}, 'V') => 'c = V.c'
----use V as data table name so both ModelSql.upsert and ModelSql.merge can use it.
----@param self ModelSql
+---use V as data table name so both Xodel.upsert and Xodel.merge can use it.
+---@param self Xodel
 ---@param columns string[]
 ---@param key Keys
 ---@param table_name string
 ---@return string
-function ModelSql._get_update_token_with_prefix(self, columns, key, table_name)
+function Xodel._get_update_token_with_prefix(self, columns, key, table_name)
   local tokens = {}
   if type(key) == "string" then
     for i, col in ipairs(columns) do
@@ -1639,12 +1690,12 @@ function ModelSql._get_update_token_with_prefix(self, columns, key, table_name)
 end
 
 ---parse select token
----@param self ModelSql
+---@param self Xodel
 ---@param a DBValue
 ---@param b? DBValue
 ---@param ...? DBValue[]
 ---@return string
-function ModelSql._get_select_token(self, a, b, ...)
+function Xodel._get_select_token(self, a, b, ...)
   if a == nil then
     error(b or "augument is required for _get_select_token")
   elseif b == nil then
@@ -1672,12 +1723,12 @@ function ModelSql._get_select_token(self, a, b, ...)
 end
 
 ---parse select literal token
----@param self ModelSql
+---@param self Xodel
 ---@param a DBValue
 ---@param b? DBValue
 ---@param ...? DBValue[]
 ---@return string
-function ModelSql._get_select_token_literal(self, a, b, ...)
+function Xodel._get_select_token_literal(self, a, b, ...)
   if b == nil then
     if type(a) == "table" then
       local tokens = {}
@@ -1699,11 +1750,11 @@ function ModelSql._get_select_token_literal(self, a, b, ...)
 end
 
 ---f{name='kate', age=22} => "name = 'kate', age = 22"
----@param self ModelSql
+---@param self Xodel
 ---@param row Record
 ---@param columns? string[]
 ---@return string
-function ModelSql._get_update_token(self, row, columns)
+function Xodel._get_update_token(self, row, columns)
   local kv = {}
   if not columns then
     for k, v in pairs(row) do
@@ -1718,11 +1769,11 @@ function ModelSql._get_update_token(self, row, columns)
   return table_concat(kv, ", ")
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param name string
----@param token? ModelSql|DBValue
+---@param token? Xodel|DBValue
 ---@return string
-function ModelSql._get_with_token(self, name, token)
+function Xodel._get_with_token(self, name, token)
   if token == nil then
     return name
   elseif self:is_instance(token) then
@@ -1733,29 +1784,29 @@ function ModelSql._get_with_token(self, name, token)
 end
 
 ---return a string like: (col, col2) VALUES ('v1', 'v2')
----@param self ModelSql
+---@param self Xodel
 ---@param row Record
 ---@param columns? string[]
 ---@return string
-function ModelSql._get_insert_token(self, row, columns)
+function Xodel._get_insert_token(self, row, columns)
   local values_token, insert_columns = self:_get_insert_values_token(row, columns)
   return string_format("(%s) VALUES %s", as_token(insert_columns), values_token)
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param columns? string[]
 ---@return string
-function ModelSql._get_bulk_insert_token(self, rows, columns)
+function Xodel._get_bulk_insert_token(self, rows, columns)
   rows, columns = self:_get_bulk_insert_values_token(rows, columns)
   return string_format("(%s) VALUES %s", as_token(columns), as_token(rows))
 end
 
 ---comment
----@param self ModelSql
----@param sub_query ModelSql
+---@param self Xodel
+---@param sub_query Xodel
 ---@param columns? string[]
-function ModelSql._set_select_subquery_insert_token(self, sub_query, columns)
+function Xodel._set_select_subquery_insert_token(self, sub_query, columns)
   local columns_token = as_token(columns or sub_query._select or "")
   if columns_token ~= "" then
     self._insert = string_format("(%s) %s", columns_token, sub_query:statement())
@@ -1767,33 +1818,33 @@ end
 --- 当literal_columns存在时:with d(c1,c2) as (delete from t returning c1,c2,'v1','v2')
 --- 但似乎没有影响, 即returning列多于with d(c1,c2)中的列
 ---set insert values from insert/update/delete returning
----@param self ModelSql
----@param sub_query ModelSql
-function ModelSql._set_cud_subquery_insert_token(self, sub_query)
+---@param self Xodel
+---@param sub_query Xodel
+function Xodel._set_cud_subquery_insert_token(self, sub_query)
   local cte_return = sub_query._cte_returning
   if cte_return then
     local cte_columns = cte_return.columns
     local insert_columns = merge_table(cte_columns, cte_return.literal_columns)
-    -- local cud_select_query = ModelSql:new { table_name = "d" }:select(cte_columns):select_literal(cte_return.literals)
-    local cud_select_query = ModelSql:new { table_name = "d" }:select(insert_columns)
+    -- local cud_select_query = Xodel:new { table_name = "d" }:select(cte_columns):select_literal(cte_return.literals)
+    local cud_select_query = Xodel:new { table_name = "d" }:select(insert_columns)
     -- self:with(string_format("d(%s)", as_token(cte_columns)), sub_query)
     self:with(string_format("d(%s)", as_token(insert_columns)), sub_query)
     self._insert = string_format("(%s) %s", as_token(insert_columns), cud_select_query:statement())
   elseif sub_query._returning_args then
     local insert_columns = flat(sub_query._returning_args)
-    local cud_select_query = ModelSql:new { table_name = "d" }:select(insert_columns)
+    local cud_select_query = Xodel:new { table_name = "d" }:select(insert_columns)
     self:with(string_format("d(%s)", as_token(insert_columns)), sub_query)
     self._insert = string_format("(%s) %s", as_token(insert_columns), cud_select_query:statement())
   end
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param row Record
 ---@param key Keys
 ---@param columns? string[]
 ---@return string
-function ModelSql._get_upsert_token(self, row, key, columns)
+function Xodel._get_upsert_token(self, row, key, columns)
   local values_token, columns = self:_get_insert_values_token(row, columns)
   local insert_token = string_format("(%s) VALUES %s ON CONFLICT (%s)", as_token(columns), values_token,
     self:_get_select_token(key))
@@ -1806,12 +1857,12 @@ function ModelSql._get_upsert_token(self, row, key, columns)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param key Keys
 ---@param columns? string[]
 ---@return string
-function ModelSql._get_bulk_upsert_token(self, rows, key, columns)
+function Xodel._get_bulk_upsert_token(self, rows, key, columns)
   rows, columns = self:_get_bulk_insert_values_token(rows, columns)
   local insert_token = string_format("(%s) VALUES %s ON CONFLICT (%s)", as_token(columns), as_token(rows),
     self:_get_select_token(key))
@@ -1824,12 +1875,12 @@ function ModelSql._get_bulk_upsert_token(self, rows, key, columns)
 end
 
 ---comment
----@param self ModelSql
----@param rows ModelSql
+---@param self Xodel
+---@param rows Xodel
 ---@param key Keys
 ---@param columns string[]
 ---@return string
-function ModelSql._get_upsert_query_token(self, rows, key, columns)
+function Xodel._get_upsert_query_token(self, rows, key, columns)
   local columns_token = self:_get_select_token(columns)
   local insert_token = string_format("(%s) %s ON CONFLICT (%s)", columns_token, rows:statement(),
     self:_get_select_token(key))
@@ -1842,12 +1893,12 @@ function ModelSql._get_upsert_query_token(self, rows, key, columns)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param a string
 ---@param b? string
 ---@param c? string
 ---@return string
-function ModelSql._get_join_expr(self, a, b, c)
+function Xodel._get_join_expr(self, a, b, c)
   if b == nil then
     return a
   elseif c == nil then
@@ -1858,13 +1909,13 @@ function ModelSql._get_join_expr(self, a, b, c)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param join_type string
 ---@param right_table string
 ---@param conditions string
 ---@param ... string
 ---@return string
-function ModelSql._get_join_token(self, join_type, right_table, conditions, ...)
+function Xodel._get_join_token(self, join_type, right_table, conditions, ...)
   if conditions ~= nil then
     return string_format("%s JOIN %s ON (%s)", join_type, right_table, self:_get_join_expr(conditions, ...))
   else
@@ -1873,49 +1924,49 @@ function ModelSql._get_join_token(self, join_type, right_table, conditions, ...)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param right_table string
 ---@param conditions string
 ---@param ... string
 ---@return string
-function ModelSql._get_inner_join(self, right_table, conditions, ...)
+function Xodel._get_inner_join(self, right_table, conditions, ...)
   return self:_get_join_token("INNER", right_table, conditions, ...)
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param right_table string
 ---@param conditions string
 ---@param ... string
 ---@return string
-function ModelSql._get_left_join(self, right_table, conditions, ...)
+function Xodel._get_left_join(self, right_table, conditions, ...)
   return self:_get_join_token("LEFT", right_table, conditions, ...)
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param right_table string
 ---@param conditions string
 ---@param ... string
 ---@return string
-function ModelSql._get_right_join(self, right_table, conditions, ...)
+function Xodel._get_right_join(self, right_table, conditions, ...)
   return self:_get_join_token("RIGHT", right_table, conditions, ...)
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param right_table string
 ---@param conditions string
 ---@param ... string
 ---@return string
-function ModelSql._get_full_join(self, right_table, conditions, ...)
+function Xodel._get_full_join(self, right_table, conditions, ...)
   return self:_get_join_token("FULL", right_table, conditions, ...)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param cols Keys
----@param range ModelSql|table|string
+---@param range Xodel|table|string
 ---@param operator? string
 ---@return string
-function ModelSql._get_in_token(self, cols, range, operator)
+function Xodel._get_in_token(self, cols, range, operator)
   cols = as_token(cols)
   operator = operator or "IN"
   if type(range) == 'table' then
@@ -1929,21 +1980,21 @@ function ModelSql._get_in_token(self, cols, range, operator)
   end
 end
 
----@param self ModelSql
----@param sub_select ModelSql
+---@param self Xodel
+---@param sub_select Xodel
 ---@param columns? string[]
 ---@return string
-function ModelSql._get_update_query_token(self, sub_select, columns)
+function Xodel._get_update_query_token(self, sub_select, columns)
   local columns_token = columns and self:_get_select_token(columns) or sub_select._select
   return string_format("(%s) = (%s)", columns_token, sub_select:statement())
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param key Keys
 ---@param left_table string
 ---@param right_table string
 ---@return string
-function ModelSql._get_join_conditions(self, key, left_table, right_table)
+function Xodel._get_join_conditions(self, key, left_table, right_table)
   if type(key) == "string" then
     return string_format("%s.%s = %s.%s", left_table, key, right_table, key)
   end
@@ -1954,12 +2005,12 @@ function ModelSql._get_join_conditions(self, key, left_table, right_table)
   return table_concat(res, " AND ")
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param columns string[]
 ---@param no_check? boolean
 ---@return string[], string[]
-function ModelSql._get_cte_values_literal(self, rows, columns, no_check)
+function Xodel._get_cte_values_literal(self, rows, columns, no_check)
   columns = columns or self:_get_keys(rows)
   rows = self:_rows_to_array(rows, columns)
   local first_row = rows[1]
@@ -1982,7 +2033,7 @@ function ModelSql._get_cte_values_literal(self, rows, columns, no_check)
   return res, columns
 end
 
-function ModelSql._handle_join(self, join_type, join_table, join_cond)
+function Xodel._handle_join(self, join_type, join_table, join_cond)
   if self._update then
     self:from(join_table)
     self:where(join_cond)
@@ -1994,7 +2045,7 @@ function ModelSql._handle_join(self, join_type, join_table, join_cond)
   end
 end
 
-function ModelSql._register_join_model(self, join_args, join_type)
+function Xodel._register_join_model(self, join_args, join_type)
   join_type = join_type or join_args.join_type or "INNER"
   local find = true
   local model = join_args.model or self
@@ -2039,10 +2090,10 @@ function ModelSql._register_join_model(self, join_args, join_type)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param col string
----@return table?, ModelSql?, string?
-function ModelSql._find_field_model(self, col)
+---@return table?, Xodel?, string?
+function Xodel._find_field_model(self, col)
   local field = self.fields[col]
   if field then
     return field, self, self._as or self.table_name
@@ -2058,7 +2109,7 @@ function ModelSql._find_field_model(self, col)
   end
 end
 
-function ModelSql._get_where_key(self, key)
+function Xodel._get_where_key(self, key)
   local a, b = key:find("__", 1, true)
   if not a then
     return self:_get_column(key), "eq"
@@ -2133,7 +2184,7 @@ function ModelSql._get_where_key(self, key)
   return prefix .. "." .. field_name, operator
 end
 
-function ModelSql._get_column(self, key)
+function Xodel._get_column(self, key)
   if self.fields[key] then
     return self._as and (self._as .. '.' .. key) or self.name_cache[key]
   end
@@ -2148,7 +2199,7 @@ function ModelSql._get_column(self, key)
   return key
 end
 
-function ModelSql._get_expr_token(self, value, key, op)
+function Xodel._get_expr_token(self, value, key, op)
   if op == "eq" then
     return string_format("%s = %s", key, as_literal(value))
   elseif op == "in" then
@@ -2174,7 +2225,7 @@ function ModelSql._get_expr_token(self, value, key, op)
   end
 end
 
-function ModelSql._get_join_number(self)
+function Xodel._get_join_number(self)
   if self._join_keys then
     return nkeys(self._join_keys) + 1
   else
@@ -2182,11 +2233,11 @@ function ModelSql._get_join_number(self)
   end
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param where_token string
 ---@param tpl string
----@return ModelSql
-function ModelSql._handle_where_token(self, where_token, tpl)
+---@return Xodel
+function Xodel._handle_where_token(self, where_token, tpl)
   if where_token == "" then
     return self
   elseif self._where == nil then
@@ -2197,11 +2248,11 @@ function ModelSql._handle_where_token(self, where_token, tpl)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param kwargs {[string|number]:any}
 ---@param logic? string
 ---@return string
-function ModelSql._get_condition_token_from_table(self, kwargs, logic)
+function Xodel._get_condition_token_from_table(self, kwargs, logic)
   local tokens = {}
   for k, value in pairs(kwargs) do
     if type(k) == "string" then
@@ -2220,12 +2271,12 @@ function ModelSql._get_condition_token_from_table(self, kwargs, logic)
   end
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param a table|string|function
 ---@param b? DBValue
 ---@param c? DBValue
 ---@return string
-function ModelSql._get_condition_token(self, a, b, c)
+function Xodel._get_condition_token(self, a, b, c)
   if b == nil then
     return self.Sql._get_condition_token(self, a)
   elseif c == nil then
@@ -2235,12 +2286,12 @@ function ModelSql._get_condition_token(self, a, b, c)
   end
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param a table|string|function
 ---@param b? DBValue
 ---@param c? DBValue
 ---@return string
-function ModelSql._get_condition_token_or(self, a, b, c)
+function Xodel._get_condition_token_or(self, a, b, c)
   if type(a) == "table" then
     return self:_get_condition_token_from_table(a, "OR")
   else
@@ -2248,12 +2299,12 @@ function ModelSql._get_condition_token_or(self, a, b, c)
   end
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param a table|string|function
 ---@param b? DBValue
 ---@param c? DBValue
 ---@return string
-function ModelSql._get_condition_token_not(self, a, b, c)
+function Xodel._get_condition_token_not(self, a, b, c)
   local token
   if type(a) == "table" then
     token = self:_get_condition_token_from_table(a, "OR")
@@ -2263,28 +2314,28 @@ function ModelSql._get_condition_token_not(self, a, b, c)
   return token ~= "" and string_format("NOT (%s)", token) or ""
 end
 
----@param self ModelSql
----@param other_sql ModelSql
+---@param self Xodel
+---@param other_sql Xodel
 ---@param inner_attr SqlSet
----@return ModelSql
-function ModelSql._handle_set_option(self, other_sql, inner_attr)
+---@return Xodel
+function Xodel._handle_set_option(self, other_sql, inner_attr)
   if not self[inner_attr] then
     self[inner_attr] = other_sql:statement();
   else
     self[inner_attr] = string_format("(%s) %s (%s)", self[inner_attr], PG_SET_MAP[inner_attr], other_sql:statement());
   end
-  if self ~= ModelSql then
+  if self ~= Xodel then
     self.statement = self._statement_for_set
   else
-    error("don't call _handle_set_option directly on ModelSql class")
+    error("don't call _handle_set_option directly on Xodel class")
   end
   return self;
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@return string
-function ModelSql._statement_for_set(self)
-  local statement = ModelSql.statement(self)
+function Xodel._statement_for_set(self)
+  local statement = Xodel.statement(self)
   if self._intersect then
     statement = string_format("(%s) INTERSECT (%s)", statement, self._intersect)
   elseif self._intersect_all then
@@ -2301,9 +2352,9 @@ function ModelSql._statement_for_set(self)
   return statement
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@return string
-function ModelSql.statement(self)
+function Xodel.statement(self)
   local table_name = self:get_table()
   local statement = assemble_sql {
     table_name = table_name,
@@ -2328,11 +2379,11 @@ function ModelSql.statement(self)
   return statement
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param name string
 ---@param token? DBValue
----@return ModelSql
-function ModelSql.with(self, name, token)
+---@return Xodel
+function Xodel.with(self, name, token)
   local with_token = self:_get_with_token(name, token)
   if self._with then
     self._with = string_format("%s, %s", self._with, with_token)
@@ -2343,48 +2394,48 @@ function ModelSql.with(self, name, token)
 end
 
 ---comment
----@param self ModelSql
----@param other_sql ModelSql
----@return ModelSql
-function ModelSql.union(self, other_sql)
+---@param self Xodel
+---@param other_sql Xodel
+---@return Xodel
+function Xodel.union(self, other_sql)
   return self:_handle_set_option(other_sql, "_union");
 end
 
-function ModelSql.union_all(self, other_sql)
+function Xodel.union_all(self, other_sql)
   return self:_handle_set_option(other_sql, "_union_all");
 end
 
-function ModelSql.except(self, other_sql)
+function Xodel.except(self, other_sql)
   return self:_handle_set_option(other_sql, "_except");
 end
 
-function ModelSql.except_all(self, other_sql)
+function Xodel.except_all(self, other_sql)
   return self:_handle_set_option(other_sql, "_except_all");
 end
 
-function ModelSql.intersect(self, other_sql)
+function Xodel.intersect(self, other_sql)
   return self:_handle_set_option(other_sql, "_intersect");
 end
 
-function ModelSql.intersect_all(self, other_sql)
+function Xodel.intersect_all(self, other_sql)
   return self:_handle_set_option(other_sql, "_intersect_all");
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param table_alias string
----@return ModelSql
-function ModelSql.as(self, table_alias)
+---@return Xodel
+function Xodel.as(self, table_alias)
   self._as = table_alias
   return self
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param name string
 ---@param rows Record[]
----@return ModelSql
-function ModelSql.with_values(self, name, rows)
+---@return Xodel
+function Xodel.with_values(self, name, rows)
   local columns = self:_get_keys(rows[1])
   rows, columns = self:_get_cte_values_literal(rows, columns, true)
   local cte_name = string_format("%s(%s)", name, table_concat(columns, ", "))
@@ -2393,12 +2444,12 @@ function ModelSql.with_values(self, name, rows)
 end
 
 ---comment
----@param self ModelSql
----@param rows Records|ModelSql
+---@param self Xodel
+---@param rows Records|Xodel
 ---@param columns? string[]|ValidateError
----@return ModelSql
-function ModelSql.insert(self, rows, columns)
-    if not self:is_instance(rows) then
+---@return Xodel
+function Xodel.insert(self, rows, columns)
+  if not self:is_instance(rows) then
     ---@cast rows Records
     if not self._skip_validate then
       rows, columns = self:validate_create_data(rows, columns)
@@ -2415,11 +2466,11 @@ function ModelSql.insert(self, rows, columns)
 end
 
 ---comment
----@param self ModelSql
----@param row Record|string|ModelSql
+---@param self Xodel
+---@param row Record|string|Xodel
 ---@param columns? string[]
----@return ModelSql
-function ModelSql.update(self, row, columns)
+---@return Xodel
+function Xodel.update(self, row, columns)
   if not self:is_instance(row) then
     if not self._skip_validate then
       row, columns = self:validate_update(row, columns)
@@ -2435,7 +2486,7 @@ function ModelSql.update(self, row, columns)
   return self.Sql.update(self, row, columns)
 end
 
-function ModelSql.gets(self, keys, columns)
+function Xodel.gets(self, keys, columns)
   if self._commit == nil or self._commit then
     return self.Sql.gets(self, keys, columns):execr()
   else
@@ -2444,20 +2495,20 @@ function ModelSql.gets(self, keys, columns)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param row any
 ---@return boolean
-function ModelSql.is_instance(self, row)
+function Xodel.is_instance(self, row)
   return is_sql_instance(row)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param key Keys?
 ---@param columns string[]?
----@return ModelSql
-function ModelSql.merge(self, rows, key, columns)
+---@return Xodel
+function Xodel.merge(self, rows, key, columns)
   if #rows == 0 then
     error("empty rows passed to merge")
   end
@@ -2484,12 +2535,12 @@ function ModelSql.merge(self, rows, key, columns)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param key Keys
 ---@param columns string[]
----@return ModelSql
-function ModelSql.upsert(self, rows, key, columns)
+---@return Xodel
+function Xodel.upsert(self, rows, key, columns)
   if #rows == 0 then
     error("empty rows passed to merge")
   end
@@ -2516,12 +2567,12 @@ function ModelSql.upsert(self, rows, key, columns)
 end
 
 ---comment
----@param self ModelSql
----@param rows Record[]|ModelSql
+---@param self Xodel
+---@param rows Record[]|Xodel
 ---@param key Keys
 ---@param columns string[]
----@return ModelSql
-function ModelSql.updates(self, rows, key, columns)
+---@return Xodel
+function Xodel.updates(self, rows, key, columns)
   if #rows == 0 then
     error("empty rows passed to merge")
   end
@@ -2548,11 +2599,11 @@ function ModelSql.updates(self, rows, key, columns)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param rows Record[]
 ---@param keys Keys
----@return ModelSql
-function ModelSql.merge_gets(self, rows, keys)
+---@return Xodel
+function Xodel.merge_gets(self, rows, keys)
   local columns = self:_get_keys(rows[1])
   rows, columns = self:_get_cte_values_literal(rows, columns, true)
   local join_cond = self:_get_join_conditions(keys, "V", self._as or self.table_name)
@@ -2567,9 +2618,9 @@ function ModelSql.merge_gets(self, rows, keys)
 end
 
 ---comment
----@param self ModelSql
----@return ModelSql
-function ModelSql.copy(self)
+---@param self Xodel
+---@return Xodel
+function Xodel.copy(self)
   local copy_sql = {}
   for key, value in pairs(self) do
     if type(value) == 'table' then
@@ -2582,10 +2633,10 @@ function ModelSql.copy(self)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param ...? unknown
----@return ModelSql
-function ModelSql.delete(self, ...)
+---@return Xodel
+function Xodel.delete(self, ...)
   self._delete = true
   if ... ~= nil then
     self:where(...)
@@ -2594,18 +2645,18 @@ function ModelSql.delete(self, ...)
 end
 
 ---comment
----@param self ModelSql
----@return ModelSql
-function ModelSql.distinct(self)
+---@param self Xodel
+---@return Xodel
+function Xodel.distinct(self)
   self._distinct = true
   return self
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param ...? DBValue[]
----@return ModelSql
-function ModelSql.select(self, ...)
+---@return Xodel
+function Xodel.select(self, ...)
   local s = self:_get_select_token(...)
   if not self._select then
     self._select = s
@@ -2616,10 +2667,10 @@ function ModelSql.select(self, ...)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param ...? DBValue[]
----@return ModelSql
-function ModelSql.select_literal(self, ...)
+---@return Xodel
+function Xodel.select_literal(self, ...)
   local s = self:_get_select_token_literal(...)
   if not self._select then
     self._select = s
@@ -2629,10 +2680,10 @@ function ModelSql.select_literal(self, ...)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param ...? DBValue[]
----@return ModelSql
-function ModelSql.returning(self, ...)
+---@return Xodel
+function Xodel.returning(self, ...)
   local s = self:_get_select_token(...)
   if not self._returning then
     self._returning = s
@@ -2649,10 +2700,10 @@ function ModelSql.returning(self, ...)
   return self
 end
 
----@param self ModelSql
+---@param self Xodel
 ---@param ...? DBValue[]
----@return ModelSql
-function ModelSql.returning_literal(self, ...)
+---@return Xodel
+function Xodel.returning_literal(self, ...)
   local s = self:_get_select_token_literal(...)
   if not self._returning then
     self._returning = s
@@ -2668,15 +2719,15 @@ function ModelSql.returning_literal(self, ...)
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@param opts CteRetOpts
----@return ModelSql
-function ModelSql.cte_returning(self, opts)
+---@return Xodel
+function Xodel.cte_returning(self, opts)
   self._cte_returning = opts
   return self
 end
 
-function ModelSql.group(self, ...)
+function Xodel.group(self, ...)
   if not self._group then
     self._group = self:_get_select_token(...)
   else
@@ -2685,9 +2736,9 @@ function ModelSql.group(self, ...)
   return self
 end
 
-function ModelSql.group_by(self, ...) return self:group(...) end
+function Xodel.group_by(self, ...) return self:group(...) end
 
-function ModelSql.order(self, ...)
+function Xodel.order(self, ...)
   if not self._order then
     self._order = self:_get_select_token(...)
   else
@@ -2696,17 +2747,17 @@ function ModelSql.order(self, ...)
   return self
 end
 
-function ModelSql.order_by(self, ...) return self:order(...) end
+function Xodel.order_by(self, ...) return self:order(...) end
 
-function ModelSql._get_args_token(self, ...) return self:_get_select_token(...) end
+function Xodel._get_args_token(self, ...) return self:_get_select_token(...) end
 
-function ModelSql.using(self, ...)
+function Xodel.using(self, ...)
   self._delete = true
   self._using = self:_get_args_token(...)
   return self
 end
 
-function ModelSql.from(self, ...)
+function Xodel.from(self, ...)
   if not self._from then
     self._from = self:_get_args_token(...)
   else
@@ -2715,11 +2766,11 @@ function ModelSql.from(self, ...)
   return self
 end
 
-function ModelSql.get_table(self)
+function Xodel.get_table(self)
   return (self._as == nil and self.table_name) or (self.table_name .. ' AS ' .. self._as)
 end
 
-function ModelSql.join(self, join_args, ...)
+function Xodel.join(self, join_args, ...)
   if type(join_args) == 'table' then
     self:_register_join_model(join_args, "INNER")
   else
@@ -2728,7 +2779,7 @@ function ModelSql.join(self, join_args, ...)
   return self
 end
 
-function ModelSql.inner_join(self, join_args, ...)
+function Xodel.inner_join(self, join_args, ...)
   if type(join_args) == 'table' then
     self:_register_join_model(join_args, "INNER")
   else
@@ -2737,7 +2788,7 @@ function ModelSql.inner_join(self, join_args, ...)
   return self
 end
 
-function ModelSql.left_join(self, join_args, ...)
+function Xodel.left_join(self, join_args, ...)
   if type(join_args) == 'table' then
     self:_register_join_model(join_args, "LEFT")
   else
@@ -2746,7 +2797,7 @@ function ModelSql.left_join(self, join_args, ...)
   return self
 end
 
-function ModelSql.right_join(self, join_args, ...)
+function Xodel.right_join(self, join_args, ...)
   if type(join_args) == 'table' then
     self:_register_join_model(join_args, "RIGHT")
   else
@@ -2755,7 +2806,7 @@ function ModelSql.right_join(self, join_args, ...)
   return self
 end
 
-function ModelSql.full_join(self, join_args, ...)
+function Xodel.full_join(self, join_args, ...)
   if type(join_args) == 'table' then
     self:_register_join_model(join_args, "FULL")
   else
@@ -2764,47 +2815,47 @@ function ModelSql.full_join(self, join_args, ...)
   return self
 end
 
-function ModelSql.limit(self, n)
+function Xodel.limit(self, n)
   self._limit = n
   return self
 end
 
-function ModelSql.offset(self, n)
+function Xodel.offset(self, n)
   self._offset = n
   return self
 end
 
-function ModelSql.where(self, first, ...)
+function Xodel.where(self, first, ...)
   local where_token = self:_get_condition_token(first, ...)
   return self:_handle_where_token(where_token, "(%s) AND (%s)")
 end
 
-function ModelSql.where_or(self, first, ...)
+function Xodel.where_or(self, first, ...)
   local where_token = self:_get_condition_token_or(first, ...)
   return self:_handle_where_token(where_token, "(%s) AND (%s)")
 end
 
-function ModelSql.or_where_or(self, first, ...)
+function Xodel.or_where_or(self, first, ...)
   local where_token = self:_get_condition_token_or(first, ...)
   return self:_handle_where_token(where_token, "%s OR %s")
 end
 
-function ModelSql.where_not(self, first, ...)
+function Xodel.where_not(self, first, ...)
   local where_token = self:_get_condition_token_not(first, ...)
   return self:_handle_where_token(where_token, "(%s) AND (%s)")
 end
 
-function ModelSql.or_where(self, first, ...)
+function Xodel.or_where(self, first, ...)
   local where_token = self:_get_condition_token(first, ...)
   return self:_handle_where_token(where_token, "%s OR %s")
 end
 
-function ModelSql.or_where_not(self, first, ...)
+function Xodel.or_where_not(self, first, ...)
   local where_token = self:_get_condition_token_not(first, ...)
   return self:_handle_where_token(where_token, "%s OR %s")
 end
 
-function ModelSql.where_exists(self, builder)
+function Xodel.where_exists(self, builder)
   if self._where then
     self._where = string_format("(%s) AND EXISTS (%s)", self._where, builder)
   else
@@ -2813,7 +2864,7 @@ function ModelSql.where_exists(self, builder)
   return self
 end
 
-function ModelSql.where_not_exists(self, builder)
+function Xodel.where_not_exists(self, builder)
   if self._where then
     self._where = string_format("(%s) AND NOT EXISTS (%s)", self._where, builder)
   else
@@ -2822,7 +2873,7 @@ function ModelSql.where_not_exists(self, builder)
   return self
 end
 
-function ModelSql.where_in(self, cols, range)
+function Xodel.where_in(self, cols, range)
   if type(cols) == "string" then
     return self.Sql.where_in(self, self:_get_column(cols), range)
   else
@@ -2834,7 +2885,7 @@ function ModelSql.where_in(self, cols, range)
   end
 end
 
-function ModelSql.where_not_in(self, cols, range)
+function Xodel.where_not_in(self, cols, range)
   if type(cols) == "string" then
     cols = self:_get_column(cols)
   else
@@ -2845,23 +2896,23 @@ function ModelSql.where_not_in(self, cols, range)
   return self.Sql.where_not_in(self, cols, range)
 end
 
-function ModelSql.where_null(self, col)
+function Xodel.where_null(self, col)
   return self.Sql.where_null(self, self:_get_column(col))
 end
 
-function ModelSql.where_not_null(self, col)
+function Xodel.where_not_null(self, col)
   return self.Sql.where_not_null(self, self:_get_column(col))
 end
 
-function ModelSql.where_between(self, col, low, high)
+function Xodel.where_between(self, col, low, high)
   return self.Sql.where_between(self, self:_get_column(col), low, high)
 end
 
-function ModelSql.where_not_between(self, col, low, high)
+function Xodel.where_not_between(self, col, low, high)
   return self.Sql.where_not_between(self, self:_get_column(col), low, high)
 end
 
-function ModelSql.or_where_in(self, cols, range)
+function Xodel.or_where_in(self, cols, range)
   if type(cols) == "string" then
     cols = self:_get_column(cols)
   else
@@ -2872,7 +2923,7 @@ function ModelSql.or_where_in(self, cols, range)
   return self.Sql.or_where_in(self, cols, range)
 end
 
-function ModelSql.or_where_not_in(self, cols, range)
+function Xodel.or_where_not_in(self, cols, range)
   if type(cols) == "string" then
     cols = self:_get_column(cols)
   else
@@ -2883,23 +2934,23 @@ function ModelSql.or_where_not_in(self, cols, range)
   return self.Sql.or_where_not_in(self, cols, range)
 end
 
-function ModelSql.or_where_null(self, col)
+function Xodel.or_where_null(self, col)
   return self.Sql.or_where_null(self, self:_get_column(col))
 end
 
-function ModelSql.or_where_not_null(self, col)
+function Xodel.or_where_not_null(self, col)
   return self.Sql.or_where_not_null(self, self:_get_column(col))
 end
 
-function ModelSql.or_where_between(self, col, low, high)
+function Xodel.or_where_between(self, col, low, high)
   return self.Sql.or_where_between(self, self:_get_column(col), low, high)
 end
 
-function ModelSql.or_where_not_between(self, col, low, high)
+function Xodel.or_where_not_between(self, col, low, high)
   return self.Sql.or_where_not_between(self, self:_get_column(col), low, high)
 end
 
-function ModelSql.where_raw(self, where_token)
+function Xodel.where_raw(self, where_token)
   if where_token == "" then
     return self
   elseif self._where then
@@ -2910,7 +2961,7 @@ function ModelSql.where_raw(self, where_token)
   return self
 end
 
-function ModelSql.or_where_exists(self, builder)
+function Xodel.or_where_exists(self, builder)
   if self._where then
     self._where = string_format("%s OR EXISTS (%s)", self._where, builder)
   else
@@ -2919,7 +2970,7 @@ function ModelSql.or_where_exists(self, builder)
   return self
 end
 
-function ModelSql.or_where_not_exists(self, builder)
+function Xodel.or_where_not_exists(self, builder)
   if self._where then
     self._where = string_format("%s OR NOT EXISTS (%s)", self._where, builder)
   else
@@ -2928,7 +2979,7 @@ function ModelSql.or_where_not_exists(self, builder)
   return self
 end
 
-function ModelSql.or_where_raw(self, where_token)
+function Xodel.or_where_raw(self, where_token)
   if where_token == "" then
     return self
   elseif self._where then
@@ -2939,7 +2990,7 @@ function ModelSql.or_where_raw(self, where_token)
   return self
 end
 
-function ModelSql.having(self, ...)
+function Xodel.having(self, ...)
   if self._having then
     self._having = string_format("(%s) AND (%s)", self._having, self:_get_condition_token(...))
   else
@@ -2948,7 +2999,7 @@ function ModelSql.having(self, ...)
   return self
 end
 
-function ModelSql.having_not(self, ...)
+function Xodel.having_not(self, ...)
   if self._having then
     self._having = string_format("(%s) AND (%s)", self._having, self:_get_condition_token_not(...))
   else
@@ -2957,7 +3008,7 @@ function ModelSql.having_not(self, ...)
   return self
 end
 
-function ModelSql.having_exists(self, builder)
+function Xodel.having_exists(self, builder)
   if self._having then
     self._having = string_format("(%s) AND EXISTS (%s)", self._having, builder)
   else
@@ -2966,7 +3017,7 @@ function ModelSql.having_exists(self, builder)
   return self
 end
 
-function ModelSql.having_not_exists(self, builder)
+function Xodel.having_not_exists(self, builder)
   if self._having then
     self._having = string_format("(%s) AND NOT EXISTS (%s)", self._having, builder)
   else
@@ -2975,7 +3026,7 @@ function ModelSql.having_not_exists(self, builder)
   return self
 end
 
-function ModelSql.having_in(self, cols, range)
+function Xodel.having_in(self, cols, range)
   local in_token = self:_get_in_token(cols, range)
   if self._having then
     self._having = string_format("(%s) AND %s", self._having, in_token)
@@ -2985,7 +3036,7 @@ function ModelSql.having_in(self, cols, range)
   return self
 end
 
-function ModelSql.having_not_in(self, cols, range)
+function Xodel.having_not_in(self, cols, range)
   local not_in_token = self:_get_in_token(cols, range, "NOT IN")
   if self._having then
     self._having = string_format("(%s) AND %s", self._having, not_in_token)
@@ -2995,7 +3046,7 @@ function ModelSql.having_not_in(self, cols, range)
   return self
 end
 
-function ModelSql.having_null(self, col)
+function Xodel.having_null(self, col)
   if self._having then
     self._having = string_format("(%s) AND %s IS NULL", self._having, col)
   else
@@ -3004,7 +3055,7 @@ function ModelSql.having_null(self, col)
   return self
 end
 
-function ModelSql.having_not_null(self, col)
+function Xodel.having_not_null(self, col)
   if self._having then
     self._having = string_format("(%s) AND %s IS NOT NULL", self._having, col)
   else
@@ -3013,7 +3064,7 @@ function ModelSql.having_not_null(self, col)
   return self
 end
 
-function ModelSql.having_between(self, col, low, high)
+function Xodel.having_between(self, col, low, high)
   if self._having then
     self._having = string_format("(%s) AND (%s BETWEEN %s AND %s)", self._having, col, low, high)
   else
@@ -3022,7 +3073,7 @@ function ModelSql.having_between(self, col, low, high)
   return self
 end
 
-function ModelSql.having_not_between(self, col, low, high)
+function Xodel.having_not_between(self, col, low, high)
   if self._having then
     self._having = string_format("(%s) AND (%s NOT BETWEEN %s AND %s)", self._having, col, low, high)
   else
@@ -3031,7 +3082,7 @@ function ModelSql.having_not_between(self, col, low, high)
   return self
 end
 
-function ModelSql.having_raw(self, token)
+function Xodel.having_raw(self, token)
   if self._having then
     self._having = string_format("(%s) AND (%s)", self._having, token)
   else
@@ -3040,7 +3091,7 @@ function ModelSql.having_raw(self, token)
   return self
 end
 
-function ModelSql.or_having(self, ...)
+function Xodel.or_having(self, ...)
   if self._having then
     self._having = string_format("%s OR %s", self._having, self:_get_condition_token(...))
   else
@@ -3049,7 +3100,7 @@ function ModelSql.or_having(self, ...)
   return self
 end
 
-function ModelSql.or_having_not(self, ...)
+function Xodel.or_having_not(self, ...)
   if self._having then
     self._having = string_format("%s OR %s", self._having, self:_get_condition_token_not(...))
   else
@@ -3058,7 +3109,7 @@ function ModelSql.or_having_not(self, ...)
   return self
 end
 
-function ModelSql.or_having_exists(self, builder)
+function Xodel.or_having_exists(self, builder)
   if self._having then
     self._having = string_format("%s OR EXISTS (%s)", self._having, builder)
   else
@@ -3067,7 +3118,7 @@ function ModelSql.or_having_exists(self, builder)
   return self
 end
 
-function ModelSql.or_having_not_exists(self, builder)
+function Xodel.or_having_not_exists(self, builder)
   if self._having then
     self._having = string_format("%s OR NOT EXISTS (%s)", self._having, builder)
   else
@@ -3076,7 +3127,7 @@ function ModelSql.or_having_not_exists(self, builder)
   return self
 end
 
-function ModelSql.or_having_in(self, cols, range)
+function Xodel.or_having_in(self, cols, range)
   local in_token = self:_get_in_token(cols, range)
   if self._having then
     self._having = string_format("%s OR %s", self._having, in_token)
@@ -3086,7 +3137,7 @@ function ModelSql.or_having_in(self, cols, range)
   return self
 end
 
-function ModelSql.or_having_not_in(self, cols, range)
+function Xodel.or_having_not_in(self, cols, range)
   local not_in_token = self:_get_in_token(cols, range, "NOT IN")
   if self._having then
     self._having = string_format("%s OR %s", self._having, not_in_token)
@@ -3096,7 +3147,7 @@ function ModelSql.or_having_not_in(self, cols, range)
   return self
 end
 
-function ModelSql.or_having_null(self, col)
+function Xodel.or_having_null(self, col)
   if self._having then
     self._having = string_format("%s OR %s IS NULL", self._having, col)
   else
@@ -3105,7 +3156,7 @@ function ModelSql.or_having_null(self, col)
   return self
 end
 
-function ModelSql.or_having_not_null(self, col)
+function Xodel.or_having_not_null(self, col)
   if self._having then
     self._having = string_format("%s OR %s IS NOT NULL", self._having, col)
   else
@@ -3114,7 +3165,7 @@ function ModelSql.or_having_not_null(self, col)
   return self
 end
 
-function ModelSql.or_having_between(self, col, low, high)
+function Xodel.or_having_between(self, col, low, high)
   if self._having then
     self._having = string_format("%s OR (%s BETWEEN %s AND %s)", self._having, col, low, high)
   else
@@ -3123,7 +3174,7 @@ function ModelSql.or_having_between(self, col, low, high)
   return self
 end
 
-function ModelSql.or_having_not_between(self, col, low, high)
+function Xodel.or_having_not_between(self, col, low, high)
   if self._having then
     self._having = string_format("%s OR (%s NOT BETWEEN %s AND %s)", self._having, col, low, high)
   else
@@ -3132,7 +3183,7 @@ function ModelSql.or_having_not_between(self, col, low, high)
   return self
 end
 
-function ModelSql.or_having_raw(self, token)
+function Xodel.or_having_raw(self, token)
   if self._having then
     self._having = string_format("%s OR %s", self._having, token)
   else
@@ -3141,12 +3192,12 @@ function ModelSql.or_having_raw(self, token)
   return self
 end
 
-function ModelSql.filter(self, kwargs)
+function Xodel.filter(self, kwargs)
   local where_token = self:_get_condition_token_from_table(kwargs)
   return self:_handle_where_token(where_token, "(%s) AND (%s)"):exec()
 end
 
-function ModelSql.exists(self)
+function Xodel.exists(self)
   local statement = string_format("SELECT EXISTS (%s)", self:select(""):limit(1):statement())
   local res, err = self.query(statement, true)
   if res == nil then
@@ -3156,12 +3207,12 @@ function ModelSql.exists(self)
   end
 end
 
-function ModelSql.commit(self, bool)
+function Xodel.commit(self, bool)
   self._commit = bool
   return self
 end
 
-function ModelSql.skip_validate(self, bool)
+function Xodel.skip_validate(self, bool)
   if bool == nil then
     bool = true
   end
@@ -3169,11 +3220,11 @@ function ModelSql.skip_validate(self, bool)
   return self
 end
 
-function ModelSql.flat(self, depth)
+function Xodel.flat(self, depth)
   return self:compact():execr():flat(depth)
 end
 
-function ModelSql.get(self, ...)
+function Xodel.get(self, ...)
   ---
   local records
   if select('#', ...) > 0 then
@@ -3188,7 +3239,7 @@ function ModelSql.get(self, ...)
   end
 end
 
-function ModelSql.get_or_create(self, params, ...)
+function Xodel.get_or_create(self, params, ...)
   local records = self:select(...):where(params):limit(2):exec()
   if #records == 1 then
     return records[1]
@@ -3202,11 +3253,11 @@ function ModelSql.get_or_create(self, params, ...)
   end
 end
 
-function ModelSql.as_set(self)
+function Xodel.as_set(self)
   return self:compact():execr():flat():as_set()
 end
 
-function ModelSql.count(self, ...)
+function Xodel.count(self, ...)
   local res, err = self:select("count(*)"):where(...):compact():exec()
   if res == nil then
     return nil, err
@@ -3215,14 +3266,14 @@ function ModelSql.count(self, ...)
   end
 end
 
-function ModelSql.execr(self)
+function Xodel.execr(self)
   return self:raw():exec()
 end
 
 ---comment
----@param self ModelSql
+---@param self Xodel
 ---@return Record[]
-function ModelSql.exec(self)
+function Xodel.exec(self)
   local statement = self:statement()
   local records, err = self.query(statement, self._compact)
   if records == nil then
@@ -3270,17 +3321,17 @@ function ModelSql.exec(self)
   end
 end
 
-function ModelSql.compact(self)
+function Xodel.compact(self)
   self._compact = true
   return self
 end
 
-function ModelSql.raw(self)
+function Xodel.raw(self)
   self._raw = true
   return self
 end
 
-function ModelSql.load_fk(self, fk_name, first, ...)
+function Xodel.load_fk(self, fk_name, first, ...)
   local fk = self.foreign_keys[fk_name]
   if fk == nil then
     return self:error(fk_name .. " is not a valid forein key name for " .. self.table_name)
@@ -3329,4 +3380,4 @@ function ModelSql.load_fk(self, fk_name, first, ...)
   return self.Sql.select(self, fks)
 end
 
-return ModelSql
+return Xodel
