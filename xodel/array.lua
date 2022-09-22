@@ -1,4 +1,4 @@
-local set = require("resty.set")
+local set = require("xodel.set")
 local table_concat = table.concat
 local table_remove = table.remove
 local table_insert = table.insert

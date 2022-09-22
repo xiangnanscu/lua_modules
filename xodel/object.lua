@@ -1,4 +1,4 @@
-local array = require("mvc.array")
+local array = require("xodel.array")
 local pairs = pairs
 local ipairs = ipairs
 local select = select

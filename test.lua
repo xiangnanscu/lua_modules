@@ -1,6 +1,6 @@
 ---@diagnostic disable: undefined-global
-local Sql = require("resty.sql")
-local set = require("resty.set")
+local Sql = require("xodel.xodel")
+local set = require("xodel.set")
 describe("Busted unit testing framework", function()
   it("Sql.", function()
 

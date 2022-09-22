@@ -1,9 +1,8 @@
-local Validator = require "mvc.validator"
-local utils = require "mvc.utils"
-local lua_array = require "mvc.array"
+local Validator = require "xodel.validator"
+local utils = require "xodel.utils"
+local lua_array = require "xodel.array"
 local cjson_encode = require "cjson.safe".encode
 local cjson_decode = require "cjson.safe".decode
-local jsobject = require "mvc.jsobject"
 local encode_base64 = ngx.encode_base64
 local hmac_sha1 = ngx.hmac_sha1
 local string_format = string.format
@@ -489,7 +488,7 @@ local table = class({
       local model = { field_names = lua_array {}, fields = {} }
       for i, field in ipairs(self.subfields) do
         if not field.__is_field_class__ then
-          field = require("mvc.model").make_field_from_json(field)
+          field = require("xodel.model").make_field_from_json(field)
         end
         table_insert(model.field_names, field.name)
         model.fields[field.name] = field
@@ -497,7 +496,7 @@ local table = class({
       self.model = model
     end
     if not self.model.__is_model_class__ then
-      self.model = require("mvc.model"):make_class(self.model)
+      self.model = require("xodel.model"):make_class(self.model)
     end
     if not self.default or self.default == "" then
       self.default = make_empty_array
@@ -726,7 +725,7 @@ local foreignkey = class({
     end
   end,
   json = function(self)
-    local app = require("mvc.app")
+    local app = require("xodel.app")
     local ret = basefield.json(self)
     ret.reference = self.reference.table_name
     ret.autocomplete = true
@@ -749,108 +748,108 @@ local foreignkey = class({
 }, basefield)
 
 -- local OSS_URL = utils.get_env("OSS_URL")
-local OSS_ACCESS_KEY_ID = utils.get_env("OSS_ACCESS_KEY_ID")
-local OSS_ACCESS_KEY_SECRET = utils.get_env("OSS_ACCESS_KEY_SECRET")
-local OSS_BUCKET = utils.get_env("OSS_BUCKET")
-local OSS_REGION = utils.get_env("OSS_REGION")
--- Bytes
-local OSS_SIZE = utils.byte_size_parser(utils.get_env("OSS_SIZE") or "7MB")
-local OSS_EXPIRATION_DAYS = tonumber(utils.get_env("OSS_EXPIRATION_DAYS") or 180)
--- https://help.aliyun.com/document_detail/31988.html?spm=5176.doc32074.6.868.KQbmQM#title-5go-s2f-dnw
-local function get_policy_time(seconds)
-  return os.date("%Y-%m-%d %H:%M:%S", os.time() + seconds):sub(1, 10) .. "T12:00:00.000Z"
-end
+-- local OSS_ACCESS_KEY_ID = utils.get_env("OSS_ACCESS_KEY_ID")
+-- local OSS_ACCESS_KEY_SECRET = utils.get_env("OSS_ACCESS_KEY_SECRET")
+-- local OSS_BUCKET = utils.get_env("OSS_BUCKET")
+-- local OSS_REGION = utils.get_env("OSS_REGION")
+-- -- Bytes
+-- local OSS_SIZE = utils.byte_size_parser(utils.get_env("OSS_SIZE") or "7MB")
+-- local OSS_EXPIRATION_DAYS = tonumber(utils.get_env("OSS_EXPIRATION_DAYS") or 180)
+-- -- https://help.aliyun.com/document_detail/31988.html?spm=5176.doc32074.6.868.KQbmQM#title-5go-s2f-dnw
+-- local function get_policy_time(seconds)
+--   return os.date("%Y-%m-%d %H:%M:%S", os.time() + seconds):sub(1, 10) .. "T12:00:00.000Z"
+-- end
 
-local POLICY = {
-  expiration = get_policy_time(3600 * 24 * OSS_EXPIRATION_DAYS),
-  conditions = { { "content-length-range", 1, OSS_SIZE } }
-}
-local function copy(obj)
-  return assert(cjson_decode(cjson_encode(obj)))
-end
+-- local POLICY = {
+--   expiration = get_policy_time(3600 * 24 * OSS_EXPIRATION_DAYS),
+--   conditions = { { "content-length-range", 1, OSS_SIZE } }
+-- }
+-- local function copy(obj)
+--   return assert(cjson_decode(cjson_encode(obj)))
+-- end
 
 
-local function get_policy(policy, self)
-  policy = utils.dict(utils.jcopy(POLICY), utils.jcopy(policy))
-  local size = utils.byte_size_parser(policy.size or OSS_SIZE)
-  policy.size = nil -- size is not a valid policy key, so delete it
-  if not policy.conditions then
-    policy.conditions = {}
-  end
-  local modified = nil
-  for _, e in ipairs(policy.conditions) do
-    if type(e) == "table" and e[1] == "content-length-range" then
-      e[3] = size
-      modified = true
-    end
-  end
-  if not modified then
-    table_insert(policy.conditions, { "content-length-range", 0, size })
-  end
-  if policy.conditions[-1] then
-    error("invalid policy index -1, field name:"..self.name)
-  end
-  return policy
-end
+-- local function get_policy(policy, self)
+--   policy = utils.dict(utils.jcopy(POLICY), utils.jcopy(policy))
+--   local size = utils.byte_size_parser(policy.size or OSS_SIZE)
+--   policy.size = nil -- size is not a valid policy key, so delete it
+--   if not policy.conditions then
+--     policy.conditions = {}
+--   end
+--   local modified = nil
+--   for _, e in ipairs(policy.conditions) do
+--     if type(e) == "table" and e[1] == "content-length-range" then
+--       e[3] = size
+--       modified = true
+--     end
+--   end
+--   if not modified then
+--     table_insert(policy.conditions, { "content-length-range", 0, size })
+--   end
+--   if policy.conditions[-1] then
+--     error("invalid policy index -1, field name:"..self.name)
+--   end
+--   return policy
+-- end
 
-local function get_payload(kwargs)
-  -- https://github.com/ali-sdk/ali-oss/blob/master/lib/client.js#L134
-  -- https://github.com/bungle/lua-resty-nettle/blame/master/README.md#L136
-  kwargs = kwargs or {}
-  local data = {}
-  local policy = get_policy(kwargs.policy, kwargs.self)
-  data.policy = encode_base64(cjson_encode(policy))
-  data.signature = encode_base64(hmac_sha1(kwargs.key_secret or OSS_ACCESS_KEY_SECRET, data.policy))
-  data.OSSAccessKeyId = kwargs.key_id or OSS_ACCESS_KEY_ID
-  data.success_action_status = 200
-  return data
-end
+-- local function get_payload(kwargs)
+--   -- https://github.com/ali-sdk/ali-oss/blob/master/lib/client.js#L134
+--   -- https://github.com/bungle/lua-resty-nettle/blame/master/README.md#L136
+--   kwargs = kwargs or {}
+--   local data = {}
+--   local policy = get_policy(kwargs.policy, kwargs.self)
+--   data.policy = encode_base64(cjson_encode(policy))
+--   data.signature = encode_base64(hmac_sha1(kwargs.key_secret or OSS_ACCESS_KEY_SECRET, data.policy))
+--   data.OSSAccessKeyId = kwargs.key_id or OSS_ACCESS_KEY_ID
+--   data.success_action_status = 200
+--   return data
+-- end
 
-local alioss_option_names = { 'size', 'policy', 'sizeArg', 'times', 'payload', 'url', 'input_type', 'image', 'maxlength',
-  'width', 'prefix', 'hash' }
-local alioss = class({
-  type = "alioss",
-  db_type = "varchar",
-  payload = get_payload(),
-  get_payload = get_payload,
-  get_policy = get_policy,
-  option_names = alioss_option_names,
-  constructor = function(self, options)
-    if options.maxlength == nil then
-      options.maxlength = 300
-    end
-    string.constructor(self, options)
-    self.key_secret = options.key_secret
-    self.key_id = options.key_id
-    if options.size then
-      self.policy = options.policy or {}
-      self.sizeArg = options.size
-      self.size = utils.byte_size_parser(options.size)
-      self.policy.size = self.size
-    end
-    if options.times then
-      self.policy.expiration = get_policy_time(utils.time_parser(options.times))
-    end
-    self.payload = get_payload { key = self.key_secret, policy = self.policy, id = self.key_id, self = self }
-    self.url = string_format("//%s.%s.aliyuncs.com/", options.bucket or OSS_BUCKET, options.region or OSS_REGION)
-    self.policy = nil
-    return self
-  end,
-  get_validators = function(self, validators)
-    table_insert(validators, 1, Validator.url)
-    return string.get_validators(self, validators)
-  end,
-  json = function(self)
-    local ret = string.json(self)
-    if ret.input_type == nil then
-      ret.input_type = "file"
-    end
-    if ret.image then
-      ret.type = "alioss_image"
-    end
-    return ret
-  end,
-}, string)
+-- local alioss_option_names = { 'size', 'policy', 'sizeArg', 'times', 'payload', 'url', 'input_type', 'image', 'maxlength',
+--   'width', 'prefix', 'hash' }
+-- local alioss = class({
+--   type = "alioss",
+--   db_type = "varchar",
+--   payload = get_payload(),
+--   get_payload = get_payload,
+--   get_policy = get_policy,
+--   option_names = alioss_option_names,
+--   constructor = function(self, options)
+--     if options.maxlength == nil then
+--       options.maxlength = 300
+--     end
+--     string.constructor(self, options)
+--     self.key_secret = options.key_secret
+--     self.key_id = options.key_id
+--     if options.size then
+--       self.policy = options.policy or {}
+--       self.sizeArg = options.size
+--       self.size = utils.byte_size_parser(options.size)
+--       self.policy.size = self.size
+--     end
+--     if options.times then
+--       self.policy.expiration = get_policy_time(utils.time_parser(options.times))
+--     end
+--     self.payload = get_payload { key = self.key_secret, policy = self.policy, id = self.key_id, self = self }
+--     self.url = string_format("//%s.%s.aliyuncs.com/", options.bucket or OSS_BUCKET, options.region or OSS_REGION)
+--     self.policy = nil
+--     return self
+--   end,
+--   get_validators = function(self, validators)
+--     table_insert(validators, 1, Validator.url)
+--     return string.get_validators(self, validators)
+--   end,
+--   json = function(self)
+--     local ret = string.json(self)
+--     if ret.input_type == nil then
+--       ret.input_type = "file"
+--     end
+--     if ret.image then
+--       ret.type = "alioss_image"
+--     end
+--     return ret
+--   end,
+-- }, string)
 
 
 

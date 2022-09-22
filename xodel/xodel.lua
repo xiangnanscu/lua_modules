@@ -32,6 +32,26 @@ local split = ngx_re.split
 ---@alias Records Record|Record[]
 ---@alias ValidateError string|table
 
+---@class ModelClass
+---@field __index ModelClass
+---@field __is_model_class__? boolean
+---@field instance_meta table
+---@field table_name string
+---@field auto_now_name? string
+---@field disable_auto_primary_key? boolean
+---@field primary_key string
+---@field default_primary_key? string
+---@field name_cache {[string]:string}
+---@field name_to_label {[string]:string}
+---@field label_to_name {[string]:string}
+---@field fields {[string]:table}
+---@field field_names string[]
+---@field names string[]
+---@field mixins? table[]
+---@field abstract? boolean
+---@field foreign_keys {[string]:table}
+local ModelClass = {}
+
 local table_new, clone, NULL
 if ngx then
   ---@diagnostic disable-next-line: undefined-field
@@ -55,16 +75,20 @@ else
     end
   })
 end
+local function split_to_set(line)
+  local res = {}
+  for _, KW in ipairs(split(line, ",")) do
+    res[KW] = true
+  end
+  return res
+end
+
 local DEFAULT_STRING_MAXLENGTH = 256
 local FOREIGN_KEY = 2
 local NON_FOREIGN_KEY = 3
 local END = 4
 local COMPARE_OPERATORS = { lt = "<", lte = "<=", gt = ">", gte = ">=", ne = "<>", eq = "=" }
-local PG_KEYWORDS = "ALL,ANALYSE,ANALYZE,AND,ANY,ARRAY,AS,ASC,ASYMMETRIC,AUTHORIZATION,BINARY,BOTH,CASE,CAST,CHECK,COLLATE,COLLATION,COLUMN,CONCURRENTLY,CONSTRAINT,CREATE,CROSS,CURRENT_CATALOG,CURRENT_DATE,CURRENT_ROLE,CURRENT_SCHEMA,CURRENT_TIME,CURRENT_TIMESTAMP,CURRENT_USER,DEFAULT,DEFERRABLE,DESC,DISTINCT,DO,ELSE,END,EXCEPT,FALSE,FETCH,FOR,FOREIGN,FREEZE,FROM,FULL,GRANT,GROUP,HAVING,ILIKE,IN,INITIALLY,INNER,INTERSECT,INTO,IS,ISNULL,JOIN,LATERAL,LEADING,LEFT,LIKE,LIMIT,LOCALTIME,LOCALTIMESTAMP,NATURAL,NOT,NOTNULL,NULL,OFFSET,ON,ONLY,OR,ORDER,OUTER,OVERLAPS,PLACING,PRIMARY,REFERENCES,RETURNING,RIGHT,SELECT,SESSION_USER,SIMILAR,SOME,SYMMETRIC,TABLE,TABLESAMPLE,THEN,TO,TRAILING,TRUE,UNION,UNIQUE,USER,USING,VARIADIC,VERBOSE,WHEN,WHERE,WINDOW,WITH"
-local IS_PG_KEYWORDS = {}
-for _, KW in ipairs(split(PG_KEYWORDS, ",")) do
-  IS_PG_KEYWORDS[KW] = true
-end
+local IS_PG_KEYWORDS = split_to_set("ALL,ANALYSE,ANALYZE,AND,ANY,ARRAY,AS,ASC,ASYMMETRIC,AUTHORIZATION,BINARY,BOTH,CASE,CAST,CHECK,COLLATE,COLLATION,COLUMN,CONCURRENTLY,CONSTRAINT,CREATE,CROSS,CURRENT_CATALOG,CURRENT_DATE,CURRENT_ROLE,CURRENT_SCHEMA,CURRENT_TIME,CURRENT_TIMESTAMP,CURRENT_USER,DEFAULT,DEFERRABLE,DESC,DISTINCT,DO,ELSE,END,EXCEPT,FALSE,FETCH,FOR,FOREIGN,FREEZE,FROM,FULL,GRANT,GROUP,HAVING,ILIKE,IN,INITIALLY,INNER,INTERSECT,INTO,IS,ISNULL,JOIN,LATERAL,LEADING,LEFT,LIKE,LIMIT,LOCALTIME,LOCALTIMESTAMP,NATURAL,NOT,NOTNULL,NULL,OFFSET,ON,ONLY,OR,ORDER,OUTER,OVERLAPS,PLACING,PRIMARY,REFERENCES,RETURNING,RIGHT,SELECT,SESSION_USER,SIMILAR,SOME,SYMMETRIC,TABLE,TABLESAMPLE,THEN,TO,TRAILING,TRUE,UNION,UNIQUE,USER,USING,VARIADIC,VERBOSE,WHEN,WHERE,WINDOW,WITH")
 local NON_MERGE_NAMES = { sql = true, fields = true, field_names = true, extends = true, mixins = true, __index = true,
   admin = true }
 local function model_ready_for_sql(model)
@@ -121,14 +145,6 @@ end
 
 local function is_field_class(t)
   return type(t) == 'table' and getmetatable(t) and getmetatable(t).__is_field_class__
-end
-
-local function model_new(cls, attrs)
-  return cls:new(attrs)
-end
-
-local function model_caller(cls, options)
-  return cls:create_model(options)
 end
 
 local function get_foreign_object(attrs, prefix)
@@ -199,9 +215,9 @@ local function make_model_instance_meta(model, cls)
 end
 
 ---comment
----@param rows Records
+---@param rows Record[]
 ---@param key Keys
----@return Records?, Keys|ValidateError
+---@return Record[]?, Keys|ValidateError
 local function check_upsert_key(rows, key)
   assert(key, "no key for upsert")
   if rows[1] then
@@ -226,7 +242,7 @@ local function check_upsert_key(rows, key)
           end
         end
         if empty_keys then
-          return nil, "empty keys for upsert"
+          error("empty keys for upsert")
         end
       end
     end
@@ -477,7 +493,7 @@ end
 ---@param self Xodel
 ---@param a DBValue
 ---@param b? DBValue
----@param ...? DBValue[]
+---@param ...? DBValue
 ---@return Xodel
 function Sql.select(self, a, b, ...)
   local s = self:_get_select_token(a, b, ...)
@@ -700,8 +716,8 @@ function Sql._get_condition_token_from_table(self, kwargs, logic)
 end
 
 ---@param self Xodel
----@param a table|string|function
----@param b? DBValue
+---@param a table|string|function condition string or table or field name
+---@param b? string operator
 ---@param c? DBValue
 ---@return string
 function Sql._get_condition_token(self, a, b, c)
@@ -919,6 +935,7 @@ end
 ---@field _intersect?  Xodel | string
 ---@field _intersect_all?  Xodel | string
 local Xodel = setmetatable({
+  Sql = Sql,
   __SQL_BUILDER__ = true,
   r = make_raw_token,
   DEFAULT = DEFAULT,
@@ -943,10 +960,27 @@ function Xodel.new(cls, self)
   return setmetatable(self or {}, cls)
 end
 
+local SQL_METHODS = split_to_set("insert,update,select,delete,where")
+---comment
+---@param cls Xodel
+---@param options ModelOpts
+---@return Xodel
 function Xodel.create_model(cls, options)
-  -- foreign_keys, label_to_name, name_to_label, primary_key, disable_auto_primary_key
-  -- abstract, sql, query, table_name, field_names, fields, extends, mixins
-  return cls:make_model_class(cls:normalize(options))
+  local XodelClass = cls:make_model_class(cls:normalize(options))
+  local XodelMeta = { __newindex = function() end, __index = function(proxy, name)
+    if type(Xodel[name]) == 'function' then
+      local self = setmetatable({}, XodelClass)
+      local origin_method = XodelClass[name]
+      local function ensure_instance_wrapper(ignore, ...)
+        return origin_method(self, ...)
+      end
+      return ensure_instance_wrapper
+    else
+      return XodelClass[name]
+    end
+  end, }
+  ---@as Xodel
+  return setmetatable({}, XodelMeta)
 end
 
 ---@class ModelOpts
@@ -1036,47 +1070,26 @@ function Xodel.normalize(cls, options)
   model.abstract = abstract
   model.__normalized__ = true
   if options.mixins then
-    return cls:merge_models(array(options.mixins) + array { model })
+    return cls:merge_models { model, unpack(options.mixins) }
   else
     return model
   end
 end
 
----@class ModelClass
----@field __index ModelClass
----@field __is_model_class__? boolean
----@field instance_meta table
----@field table_name string
----@field auto_now_name? string
----@field disable_auto_primary_key? boolean
----@field primary_key string
----@field default_primary_key? string
----@field name_cache {[string]:string}
----@field name_to_label {[string]:string}
----@field label_to_name {[string]:string}
----@field fields {[string]:table}
----@field field_names string[]
----@field names string[]
----@field mixins? table[]
----@field abstract? boolean
----@field foreign_keys {[string]:table}
-
 ---comment
 ---@param cls Xodel
 ---@param model ModelOpts
----@return ModelClass|ModelOpts
+---@return ModelClass
 function Xodel.make_model_class(cls, model)
-  -- set foreign_keys, names, auto_now_name, primary_key, sql, name_cache, name_to_label, label_to_name
-  -- __index, __is_model_class__, instance_meta
   setmetatable(model, cls)
-  local not_abstract = not model.abstract
-  if not_abstract then
-    if not model.table_name then
-      local names_hint = model.field_names and model.field_names:join(",") or "no field_names"
-      error(string_format("you must define table_name for a non-abstract model (%s)", names_hint))
-    end
-    check_reserved(model.table_name)
+  -- local not_abstract = not model.abstract
+  -- if not_abstract then
+  if not model.table_name then
+    local names_hint = model.field_names and model.field_names:join(",") or "no field_names"
+    error(string_format("you must define table_name for a non-abstract model (%s)", names_hint))
   end
+  check_reserved(model.table_name)
+  -- end
   local pk_defined = false
   model.foreign_keys = {}
   model.names = array {}
@@ -1102,36 +1115,36 @@ function Xodel.make_model_class(cls, model)
     end
   end
   -- ensure primary key
-  if not_abstract and not pk_defined and not model.disable_auto_primary_key then
-    local pk_name = model.default_primary_key or "id"
-    model.primary_key = pk_name
-    model.fields[pk_name] = Field.integer { name = pk_name, primary_key = true, serial = true }
-    table.insert(model.field_names, 1, pk_name)
-  end
+  -- if not_abstract and not pk_defined and not model.disable_auto_primary_key then
+  local pk_name = model.default_primary_key or "id"
+  model.primary_key = pk_name
+  model.fields[pk_name] = Field.integer { name = pk_name, primary_key = true, serial = true }
+  table.insert(model.field_names, 1, pk_name)
+  -- end
   -- sql
 
-  if not_abstract then
-    model.name_cache = {}
-  end
+  -- if not_abstract then
+  model.name_cache = {}
+  -- end
   model.label_to_name = {}
   model.name_to_label = {}
   for name, field in pairs(model.fields) do
     model.label_to_name[field.label] = name
     model.name_to_label[name] = field.label
-    if not_abstract then
-      model.name_cache[name] = model.table_name .. "." .. name
-    end
+    -- if not_abstract then
+    model.name_cache[name] = model.table_name .. "." .. name
+    -- end
     if field.db_type == Field.basefield.NOT_DEFIEND then
       field.db_type = model.fields[field.reference_column].db_type
     end
   end
-  if model.abstract then
-    return model
-  end
+  -- if model.abstract then
+  --   return model
+  -- end
   model.__index = model
   model.__is_model_class__ = true
   model.instance_meta = make_model_instance_meta(model, cls)
-  return model
+  return model --[[@as ModelClass]]
 end
 
 function Xodel.mix_with_base(cls, ...)
@@ -1159,6 +1172,11 @@ function Xodel.merge_models(cls, models)
   return array(models):reduce(cls.merge_model_fn)
 end
 
+---comment
+---@param cls Xodel
+---@param a ModelOpts
+---@param b ModelOpts
+---@return ModelOpts
 function Xodel.merge_model(cls, a, b)
   local A = a.__normalized__ and a or cls:normalize(a)
   local B = b.__normalized__ and b or cls:normalize(b)
@@ -1166,14 +1184,14 @@ function Xodel.merge_model(cls, a, b)
   local field_names = (A.field_names + B.field_names):uniq()
   local fields = {}
   for i, name in ipairs(field_names) do
-    local a_field = A.fields[name]
-    local b_field = B.fields[name]
-    if a_field and b_field then
-      fields[name] = Xodel:merge_field(a_field, b_field)
-    elseif a_field then
-      fields[name] = a_field
+    local af = A.fields[name]
+    local bf = B.fields[name]
+    if af and bf then
+      fields[name] = Xodel:merge_field(af, bf)
+    elseif af then
+      fields[name] = af
     else
-      fields[name] = b_field
+      fields[name] = assert(bf, string_format("can't find field %s for model %s", name, B.table_name))
     end
   end
   -- merge的时候abstract应该当做可合并的属性
@@ -1285,7 +1303,12 @@ function Xodel.update_from(cls, data, key)
     error("update error:" .. tostring(res))
   end
 end
-
+---comment
+---@param cls Xodel
+---@param data Record
+---@param columns? string[]
+---@param is_update? boolean
+---@return Record?, ValidateError?
 function Xodel.prepare_for_db(cls, data, columns, is_update)
   local prepared = {}
   for _, name in ipairs(columns or cls.names) do
@@ -1400,8 +1423,8 @@ end
 
 ---comment
 ---@param cls Xodel
----@param rows Records
----@param columns string[]?
+---@param rows Record|Record[]
+---@param columns? string[]
 ---@return Records?, string[]|ValidateError
 function Xodel.validate_create_data(cls, rows, columns)
   local err_obj, cleaned
@@ -1451,20 +1474,20 @@ end
 
 ---comment
 ---@param cls Xodel
----@param rows Records
----@param key Keys?
----@param columns string[]?
----@return Records?, Keys|ValidateError, string[]?
+---@param rows Record[]
+---@param key? Keys
+---@param columns? string[]
+---@return Record[]?, Keys|ValidateError, string[]?
 function Xodel.validate_create_rows(cls, rows, key, columns)
-  local rows2, key2 = check_upsert_key(rows, key or cls.primary_key)
-  if rows2 == nil then
-    return nil, key2
+  local checked_rows, checked_key = check_upsert_key(rows, key or cls.primary_key)
+  if checked_rows == nil then
+    return nil, checked_key
   end
-  local rows2, columns = cls:validate_create_data(rows2, columns)
-  if rows2 == nil then
-    return nil, columns
+  local cleaned_rows, cleaned_columns = cls:validate_create_data(checked_rows, columns)
+  if cleaned_rows == nil then
+    return nil, cleaned_columns
   end
-  return rows2, key2, columns
+  return cleaned_rows, checked_key, cleaned_columns
 end
 
 function Xodel.parse_error_message(cls, err)
@@ -1516,24 +1539,26 @@ end
 ---comment
 ---@param cls Xodel
 ---@param rows Records
----@param columns Keys?
+---@param columns string[]?
 ---@param is_update boolean?
----@return table?, Keys?
+---@return Records?, string[]|ValidateError
 function Xodel.prepare_db_rows(cls, rows, columns, is_update)
   local err, cleaned
   columns = columns or cls:_get_keys(rows)
   if rows[1] then
+    ---@cast rows Record[]
     cleaned = {}
     for i, row in ipairs(rows) do
       row, err = cls:prepare_for_db(row, columns, is_update)
-      if row == nil then
+      if err ~= nil then
         return nil, err
       end
       cleaned[i] = row
     end
   else
+    ---@cast rows Record
     cleaned, err = cls:prepare_for_db(rows, columns, is_update)
-    if cleaned == nil then
+    if err ~= nil then
       return nil, err
     end
   end
@@ -1693,12 +1718,10 @@ end
 ---@param self Xodel
 ---@param a DBValue
 ---@param b? DBValue
----@param ...? DBValue[]
+---@param ...? DBValue
 ---@return string
 function Xodel._get_select_token(self, a, b, ...)
-  if a == nil then
-    error(b or "augument is required for _get_select_token")
-  elseif b == nil then
+  if b == nil then
     if type(a) == "table" then
       local tokens = {}
       for i = 1, #a do
@@ -1726,7 +1749,7 @@ end
 ---@param self Xodel
 ---@param a DBValue
 ---@param b? DBValue
----@param ...? DBValue[]
+---@param ...? DBValue
 ---@return string
 function Xodel._get_select_token_literal(self, a, b, ...)
   if b == nil then
@@ -2505,24 +2528,27 @@ end
 ---comment
 ---@param self Xodel
 ---@param rows Record[]
----@param key Keys?
----@param columns string[]?
+---@param key? Keys
+---@param columns? string[]
 ---@return Xodel
 function Xodel.merge(self, rows, key, columns)
   if #rows == 0 then
     error("empty rows passed to merge")
   end
+  local validate_rows, prepared_rows, prepared_columns
   if not self._skip_validate then
-    rows, key, columns = self:validate_create_rows(rows, key, columns)
-    if rows == nil then
+    validate_rows, key, columns = self:validate_create_rows(rows, key, columns)
+    if validate_rows == nil then
       error(key)
     end
+  else
+    validate_rows = rows
   end
-  rows, columns = self:prepare_db_rows(rows, columns, false)
-  if rows == nil then
-    error(columns)
+  prepared_rows, prepared_columns = self:prepare_db_rows(validate_rows, columns, false)
+  if prepared_rows == nil then
+    error(prepared_columns)
   end
-  self = Sql.merge(self, rows, key, columns)
+  self = Sql.merge(self, rows, key, prepared_columns)
   if self._commit == nil or self._commit then
     if not self._returning then
       return self:returning(key):compact():execr()
@@ -2634,12 +2660,14 @@ end
 
 ---comment
 ---@param self Xodel
----@param ...? unknown
+---@param a? table|string|function condition string or table or field name
+---@param b? string operator
+---@param c? DBValue
 ---@return Xodel
-function Xodel.delete(self, ...)
+function Xodel.delete(self, a, b, c)
   self._delete = true
-  if ... ~= nil then
-    self:where(...)
+  if a ~= nil then
+    self:where(a, b, c)
   end
   return self
 end
@@ -2654,10 +2682,12 @@ end
 
 ---comment
 ---@param self Xodel
----@param ...? DBValue[]
+---@param a DBValue
+---@param b? DBValue
+---@param ...? DBValue
 ---@return Xodel
-function Xodel.select(self, ...)
-  local s = self:_get_select_token(...)
+function Xodel.select(self, a, b, ...)
+  local s = self:_get_select_token(a, b, ...)
   if not self._select then
     self._select = s
   elseif s ~= nil and s ~= "" then
@@ -2668,10 +2698,12 @@ end
 
 ---comment
 ---@param self Xodel
----@param ...? DBValue[]
+---@param a DBValue
+---@param b? DBValue
+---@param ...? DBValue
 ---@return Xodel
-function Xodel.select_literal(self, ...)
-  local s = self:_get_select_token_literal(...)
+function Xodel.select_literal(self, a, b, ...)
+  local s = self:_get_select_token_literal(a, b, ...)
   if not self._select then
     self._select = s
   elseif s ~= nil and s ~= "" then
@@ -2681,10 +2713,12 @@ function Xodel.select_literal(self, ...)
 end
 
 ---@param self Xodel
----@param ...? DBValue[]
+---@param a DBValue
+---@param b? DBValue
+---@param ...? DBValue
 ---@return Xodel
-function Xodel.returning(self, ...)
-  local s = self:_get_select_token(...)
+function Xodel.returning(self, a, b, ...)
+  local s = self:_get_select_token(a, b, ...)
   if not self._returning then
     self._returning = s
   elseif s ~= nil and s ~= "" then
@@ -2701,10 +2735,12 @@ function Xodel.returning(self, ...)
 end
 
 ---@param self Xodel
----@param ...? DBValue[]
+---@param a DBValue
+---@param b? DBValue
+---@param ...? DBValue
 ---@return Xodel
-function Xodel.returning_literal(self, ...)
-  local s = self:_get_select_token_literal(...)
+function Xodel.returning_literal(self, a, b, ...)
+  local s = self:_get_select_token_literal(a, b, ...)
   if not self._returning then
     self._returning = s
   elseif s ~= nil and s ~= "" then
@@ -2825,6 +2861,11 @@ function Xodel.offset(self, n)
   return self
 end
 
+---comment
+---@param self Xodel
+---@param first table|string|function
+---@param ... unknown
+---@return Xodel
 function Xodel.where(self, first, ...)
   local where_token = self:_get_condition_token(first, ...)
   return self:_handle_where_token(where_token, "(%s) AND (%s)")

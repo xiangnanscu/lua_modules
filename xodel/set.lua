@@ -4,6 +4,7 @@ local table_concat = table.concat
 local table_clear
 local isempty
 if ngx then
+---@diagnostic disable-next-line: undefined-field
   table_clear = table.clear
   isempty = require "table.isempty"
 else

@@ -2,11 +2,16 @@
   "Lua.runtime.version": "LuaJIT",
   "Lua.diagnostics.globals": [
     "ngx",
-    "table.new",
+    "table.new"
   ],
   "Lua.workspace.library": [
     "${3rd}/OpenResty/library"
   ],
   "editor.formatOnPaste": false,
+  "Lua.typeFormat.config": {
+    "format_line": "false",
+    "auto_complete_end": "false",
+    "auto_complete_table_sep": "false"
+  },
   "Lua.workspace.checkThirdParty": false
 }
